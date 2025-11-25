@@ -1,6 +1,10 @@
-streamlit==1.46.1
-numpy==1.26.4
-pandas==2.2.2
-plotly==5.24.1
-kaleido==0.2.1
-reportlab==4.2.2
+{
+  "builds": [
+    {"src": "app.py", "use": "@vercel/python"},
+    {"src": "api/pdf.py", "use": "@vercel/python"}
+  ],
+  "routes": [
+    {"src": "/api/pdf", "dest": "api/pdf.py"},
+    {"src": "/(.*)", "dest": "app.py"}
+  ]
+}

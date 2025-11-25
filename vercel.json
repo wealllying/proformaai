@@ -1,10 +1,14 @@
 {
   "builds": [
-    { "src": "app.py", "use": "@vercel/python" },
-    { "src": "api/pdf.py", "use": "@vercel/python" }
+    {
+      "src": "Dockerfile",
+      "use": "@vercel/static-build"
+    }
   ],
   "routes": [
-    { "src": "/api/pdf", "dest": "api/pdf.py" },
-    { "src": "/(.*)", "dest": "app.py" }
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
   ]
 }

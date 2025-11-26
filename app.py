@@ -113,38 +113,46 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
             st.rerun()
 
     # HANDLE STRIPE CHECKOUT REDIRECT
-   if "pending_checkout" in st.session_state:
-    checkout = st.session_state.pending_checkout
-    del st.session_state.pending_checkout
+# --- STRIPE CHECKOUT HANDLER ---
+if "pending_checkout" not in st.session_state:
+    st.session_state.pending_checkout = False
 
-    STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
-
-    js = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <script src="https://js.stripe.com/v3/"></script>
-    </head>
-    <body>
+if st.session_state.pending_checkout:
+    # Inject JS safely
+    js = """
     <script>
-    const stripe = Stripe('{STRIPE_PK}');
-    stripe.redirectToCheckout({{
-        lineItems: [{{ price: '{checkout["price"]}', quantity: 1 }}],
-        mode: 'payment',
-        successUrl: '{checkout["success_url"]}',
-        cancelUrl: '{checkout["cancel_url"]}',
-    }}).then(function (result) {{
-        if (result.error) {{
-            window.alert(result.error.message);
-        }}
-    }});
+        window.open('%s', '_blank');
     </script>
-    </body>
-    </html>
-    """
+    """ % st.session_state.checkout_url
 
-    st.components.v1.html(js, height=50)
-    st.stop()
+    st.markdown(js, unsafe_allow_html=True)
+    st.session_state.pending_checkout = False
+
+
+# --- PAYWALL BUTTON ---
+if st.button("Unlock Full Model ($49)"):
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": "Pro Forma AI – Full Access"},
+                "unit_amount": 4900,
+            },
+            "quantity": 1,
+        }],
+        success_url="https://yourdomain.com/success",
+        cancel_url="https://yourdomain.com/cancel",
+    )
+
+    st.session_state.checkout_url = session.url
+    st.session_state.pending_checkout = True
+
+    st.success("Redirecting to secure checkout…")
 
 # ---------------------------
 # SIDEBAR INPUTS (including logo input)

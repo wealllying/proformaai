@@ -78,9 +78,16 @@ VALID_TOKENS = {
 # ←←←←← CHANGE THIS — YOUR REAL DEPLOYED URL (copy from browser)
 APP_URL = "https://proforma-ai-production.up.railway.app/"   # ←←←←← CHANGE
 
-plan = st.query_params.get("plan")
-token = st.query_params.get("token")
+# ---------------------------
+# PAYWALL — FIXED QUERY PARAMS + RELIABLE UNLOCK
+# ---------------------------
 
+# Correct Streamlit query param handling
+qp = st.query_params
+plan = qp.get("plan", None)
+token = qp.get("token", None)
+
+# Validate access
 if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
     st.title("Pro Forma AI — Institutional Access Required")
     st.markdown("### Unlock Full Model Instantly")
@@ -105,16 +112,12 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
             }
             st.rerun()
 
-    # ←←←←← THIS PART RUNS THE ACTUAL STRIPE CHECKOUT
+    # HANDLE STRIPE CHECKOUT REDIRECT
     if "pending_checkout" in st.session_state:
         checkout = st.session_state.pending_checkout
         del st.session_state.pending_checkout
 
-        # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-        # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-        # PUT YOUR REAL PUBLISHABLE KEY HERE (starts with pk_test_ or pk_live_)
-        STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"   # ←←←← CHANGE THIS
-        # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+        STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
 
         js = f"""
         <script src="https://js.stripe.com/v3/"></script>
@@ -137,6 +140,11 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
 
     st.markdown("<p style='text-align:center; margin-top:50px; color:#666; font-size:18px;'>Payment → Instant Auto-Unlock</p>", unsafe_allow_html=True)
     st.stop()
+
+# ---------------------------
+# (The rest of your app continues below unchanged)
+# ---------------------------
+
 # ---------------------------
 # SIDEBAR INPUTS (including logo input)
 # ---------------------------

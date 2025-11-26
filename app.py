@@ -12,6 +12,10 @@ import math
 from datetime import datetime
 import io
 import csv
+import os
+import concurrent.futures
+import multiprocessing
+from typing import Tuple, List
 
 st.set_page_config(page_title="Pro Forma AI — Institutional (Full)", layout="wide")
 
@@ -55,6 +59,10 @@ with st.sidebar:
         mezz_pct = st.slider("Mezz % of Cost", 0.0, 40.0, 10.0) / 100.0
         mezz_rate = st.slider("Mezz Rate %", 0.0, 20.0, 10.0) / 100.0
         mezz_term = st.number_input("Mezz Term (years)", 1, 10, 5)
+    else:
+        mezz_pct = 0.0
+        mezz_rate = 0.0
+        mezz_term = 0
 
     st.subheader("Equity")
     total_equity = total_cost * (1 - senior_ltv - (mezz_pct if use_mezz else 0.0))
@@ -90,7 +98,7 @@ with st.sidebar:
         promote_tiers = None
 
     st.header("Monte Carlo & Performance")
-    n_sims = st.number_input("Monte Carlo sims", min_value=500, max_value=100000, value=5000, step=500)
+    n_sims = st.number_input("Monte Carlo sims", min_value=500, max_value=200_000, value=5_000, step=500)
     sigma_rent = st.slider("Rent vol (σ)", 0.0, 0.25, 0.02, 0.005)
     sigma_opex = st.slider("OpEx vol (σ)", 0.0, 0.25, 0.015, 0.005)
     sigma_cap = st.slider("Cap vol (σ)", 0.0, 0.10, 0.004, 0.001)
@@ -168,43 +176,28 @@ def compute_amort_schedule(loan, rate, amort_years, years):
     return balances, interests, principals, payments
 
 # Settlement engine: final settlement at exit (IRR-hurdle multi-tier)
-def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, equity_lp, promote_tiers):
+def settle_final_distribution(lp_cf_so_far: List[float], gp_cf_so_far: List[float],
+                              remaining_residual: float, equity_lp: float,
+                              promote_tiers) -> Tuple[float, float]:
     """
-    Inputs:
-      - lp_cf_so_far: list of LP CFs up to but excluding final residual
-      - gp_cf_so_far: list of GP CFs up to but excluding final residual
-      - remaining_residual: dollars to split at exit (after ROC & pref payment)
-      - equity_lp: LP equity invested (positive)
-      - promote_tiers: list of tuples (hurdle_decimal, gp_pct), ordered ascending
-    Returns:
-      (lp_add, gp_add) allocation of remaining_residual according to multi-tier IRR hurdles.
-    Algorithm:
-      - iterate tiers: for each tier, find amount of residual to allocate to LP such that LP's IRR reaches the tier hurdle.
-      - allocate minimal amount to LP to reach the hurdle, then apply GP% to the remainder per tier.
-    Note: This is a pragmatic single-period settlement approximating common PE waterfalls.
+    Returns (lp_add, gp_add) allocation of remaining_residual according to multi-tier IRR hurdles.
     """
     if remaining_residual <= 0 or promote_tiers is None or len(promote_tiers) == 0:
-        # simple split default 80/20 (LP/GP)
         lp_share = 0.8
         return remaining_residual * lp_share, remaining_residual * (1 - lp_share)
 
-    # Work in dollars; start with LP gets all; raise GP share progressively
     lp_add_total = 0.0
     gp_add_total = 0.0
     residual_left = remaining_residual
-    # copy CF lists
     lp_so_far = lp_cf_so_far.copy()
     gp_so_far = gp_cf_so_far.copy()
 
-    for i, (hurdle, gp_pct) in enumerate(promote_tiers):
+    for (hurdle, gp_pct) in promote_tiers:
         if residual_left <= 0:
             break
-        # Goal: find minimal X (≤ residual_left) to give LP such that LP IRR (with lp_so_far + X) reaches hurdle
-        # If giving LP all residual still doesn't reach hurdle, give LP everything and continue
         lp_candidate_full = lp_so_far + [residual_left]
         irr_full = robust_irr(lp_candidate_full)
         if not np.isnan(irr_full) and irr_full >= hurdle:
-            # binary search for X in [0, residual_left] such that irr(lp_so_far + X) == hurdle
             low, high = 0.0, residual_left
             for _ in range(60):
                 mid = (low + high) / 2.0
@@ -216,11 +209,9 @@ def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, eq
                     high = mid
                 else:
                     low = mid
-            # high is minimal X to reach hurdle
             X = high
             lp_add_total += X
             residual_left -= X
-            # Now apply promote split on remaining residual_left according to gp_pct for this tier
             gp_take = residual_left * gp_pct
             lp_take = residual_left - gp_take
             lp_add_total += lp_take
@@ -228,12 +219,10 @@ def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, eq
             residual_left = 0.0
             break
         else:
-            # even giving LP all residual doesn't reach hurdle => give LP all and move on
             lp_add_total += residual_left
             residual_left = 0.0
             break
 
-    # Anything left (should be zero) give default split
     if residual_left > 0:
         lp_add_total += residual_left * 0.8
         gp_add_total += residual_left * 0.2
@@ -242,47 +231,32 @@ def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, eq
 
 # Per-period waterfall (ROC -> PREF -> Catch-up -> Residual accumulation)
 def apply_periodic_waterfall(distributable, lp_roc_remaining, lp_pref_accrued, equity_lp, pref_annual, catchup_pct):
-    """
-    Apply ROC and PREF per period. Return (lp_paid, gp_paid, updated_lp_roc_remaining, updated_lp_pref_accrued, residual_left)
-    residual_left is the cash remaining after ROC and PREF and catch-up, to be handled at exit (layered promote).
-    """
     lp_paid = 0.0
     gp_paid = 0.0
     rem = distributable
 
-    # 1) Return of capital
     if lp_roc_remaining > 0 and rem > 0:
         pay = min(lp_roc_remaining, rem)
         lp_paid += pay
         lp_roc_remaining -= pay
         rem -= pay
 
-    # 2) Pay accrued pref
-    # lp_pref_accrued is an accrued balance (we will add accrual outside each year)
     if lp_pref_accrued > 0 and rem > 0:
         pay = min(lp_pref_accrued, rem)
         lp_paid += pay
         lp_pref_accrued -= pay
         rem -= pay
 
-    # 3) Catch-up could be coded here (if desired). For simplicity we assume catch-up is an extra distribution to GP from rem.
     if catchup_pct > 0 and rem > 0:
-        # give GP catchup_pct of rem (this is simplified; real catch-ups are structured differently)
         gp_catch = rem * catchup_pct
         gp_paid += gp_catch
         rem -= gp_catch
 
-    # rem is residual to accumulate for final settlement
     residual_left = rem
     return lp_paid, gp_paid, lp_roc_remaining, lp_pref_accrued, residual_left
 
 # Build deterministic per-period cash flows and collect residual for final settlement
 def build_model_and_settle_det():
-    """
-    Build deterministic CFs across hold and then perform final settlement using multi-tier promote.
-    Returns structured outputs including LP/GP CFs.
-    """
-    # Capital stack
     senior_loan = total_cost * senior_ltv
     mezz_loan = total_cost * mezz_pct if (use_mezz and mezz_pct > 0) else 0.0
     equity_total = total_cost - senior_loan - mezz_loan
@@ -293,16 +267,12 @@ def build_model_and_settle_det():
     lp_cfs = [ -equity_lp ]
     gp_cfs = [ -equity_gp ]
     dscr_path = []
-    balances = []
-    # amort schedules
-    bal = senior_loan
-    balances.append(bal)
     lp_roc_remaining = equity_lp
     lp_pref_accrued = 0.0
-    preferential_paid_total = 0.0
-    residual_accumulator = 0.0  # accumulate residuals per period to be split at exit by promote tiers
+    residual_accumulator = 0.0
 
     balances, interests, principals, payments = compute_amort_schedule(senior_loan, senior_rate, max(1, senior_amort), hold)
+    bal = senior_loan
 
     for y in range(1, hold+1):
         years.append(f"Year {y}")
@@ -310,17 +280,14 @@ def build_model_and_settle_det():
         egi = gpr * (1 - vacancy)
         opex = opex_y1 * ((1 + opex_growth) ** (y-1)) + reserves
         noi = egi - opex
-        # taxes minimal/simple placeholder
         tax = 0.0
         noi_at = noi - tax
 
-        # debt service
         if senior_amort == 0 or y <= senior_io:
             interest = bal * senior_rate
             principal = 0.0
             payment = interest
         else:
-            # use payments list if enough entries
             if y-1 < len(payments):
                 payment = payments[y-1]
             else:
@@ -334,10 +301,8 @@ def build_model_and_settle_det():
 
         op_cf = noi_at - ds
 
-        # accrue pref
         lp_pref_accrued += equity_lp * pref_annual
 
-        # apply periodic waterfall: return of capital & pref & catchup, leftover accumulates as residual
         lp_paid, gp_paid, lp_roc_remaining, lp_pref_accrued, residual_left = apply_periodic_waterfall(
             op_cf, lp_roc_remaining, lp_pref_accrued, equity_lp, pref_annual, catchup_pct
         )
@@ -346,22 +311,16 @@ def build_model_and_settle_det():
         gp_cfs.append(gp_paid)
         residual_accumulator += residual_left
 
-    # At exit: compute exit proceeds from last-year NOI using exit cap
-    # Use last-year NOI_at computed in loop (noi_at)
     exit_value = noi_at / safe_cap(exit_cap)
     exit_net = exit_value * (1 - selling_costs)
-    # pay senior loan balance off (bal)
     exit_reversion = max(exit_net - bal, 0.0)
-    # combine exit reversion with accumulated residual for final split
     final_residual = residual_accumulator + exit_reversion
 
-    # Perform final settlement according to promote tiers using LP/GP cashflows so far
     lp_add, gp_add = settle_final_distribution(lp_cfs, gp_cfs, final_residual, equity_lp, promote_tiers)
 
-    lp_cfs[-1] += lp_add  # add to last period
+    lp_cfs[-1] += lp_add
     gp_cfs[-1] += gp_add
 
-    # Build CF table
     cf_table = pd.DataFrame({
         "Period": ["Year 0"] + years,
         "LP CF": [lp_cfs[0]] + lp_cfs[1:],
@@ -377,30 +336,61 @@ def build_model_and_settle_det():
         "exit_reversion": exit_reversion
     }
 
-# Monte Carlo: run sims and apply same settlement engine per sim
-def run_montecarlo(n_sims):
-    # covariance matrix
+# ---------------------------
+# Parallel Monte Carlo worker (module-level for multiprocessing)
+# ---------------------------
+def _monte_worker(seed: int,
+                  sims: int,
+                  senior_loan: float,
+                  senior_rate: float,
+                  senior_amort: int,
+                  senior_io: int,
+                  gpr_y1: float,
+                  rent_growth: float,
+                  vacancy: float,
+                  opex_y1: float,
+                  opex_growth: float,
+                  reserves: float,
+                  hold: int,
+                  exit_cap: float,
+                  selling_costs: float,
+                  pref_annual: float,
+                  catchup_pct: float,
+                  sigma_rent: float,
+                  sigma_opex: float,
+                  sigma_cap: float,
+                  corr: np.ndarray,
+                  promote_tiers,
+                  lp_share_default: float) -> Tuple[List[float], int]:
+    """
+    Worker executes 'sims' Monte Carlo paths and returns (irrs_list, dscr_breach_count)
+    Deterministic inputs must be passed in (no closures) so this can run in child processes.
+    """
+    rng = np.random.RandomState(seed)
+    # build cov and cholesky
     cov = np.diag([sigma_rent**2, sigma_opex**2, sigma_cap**2])
     cov = np.sqrt(cov) @ corr @ np.sqrt(cov)
-    # cholesky (robust)
     try:
         L = np.linalg.cholesky(cov)
     except Exception:
         L = np.diag([sigma_rent, sigma_opex, sigma_cap])
 
-    senior_loan = total_cost * senior_ltv
-    mezz_loan_amt = total_cost * mezz_pct if (use_mezz and mezz_pct > 0) else 0.0
-    equity_total = total_cost - senior_loan - mezz_loan_amt
+    equity_total = (purchase_price * (1 + closing_costs_pct)) - senior_loan - (mezz_pct * purchase_price * (1 + closing_costs_pct) if use_mezz else 0.0)
     equity_lp = equity_total * lp_share_default
 
-    irrs = []
-    dscr_breach_count = 0
-    for i in range(n_sims):
-        z = np.random.normal(size=3)
+    local_irrs = []
+    local_breaches = 0
+
+    # amort schedule precompute
+    balances_template, interests_template, principals_template, payments_template = compute_amort_schedule(senior_loan, senior_rate, max(1, senior_amort), hold)
+
+    for i in range(sims):
+        z = rng.normal(size=3)
         shocks = L @ z
         rent_shock = 1.0 + shocks[0]
         opex_shock = 1.0 + shocks[1]
         cap_shock = shocks[2]
+
         bal = senior_loan
         lp_cf_sim = [-equity_lp]
         lp_roc_remaining = equity_lp
@@ -408,18 +398,18 @@ def run_montecarlo(n_sims):
         dscr_path = []
         residual_acc = 0.0
 
-        balances, interests, principals, payments = compute_amort_schedule(senior_loan, senior_rate, max(1, senior_amort), hold)
+        # copy payments for per-sim usage
+        payments = payments_template
 
         for y in range(1, hold+1):
             gpr = gpr_y1 * ((1 + rent_growth) ** (y-1)) * rent_shock
-            v = float(np.clip(vacancy + np.random.normal(0, 0.01), 0.0, 0.9))
+            v = float(np.clip(vacancy + rng.normal(0, 0.01), 0.0, 0.9))
             egi = gpr * (1 - v)
             opex = opex_y1 * ((1 + opex_growth) ** (y-1)) * opex_shock + reserves
             noi = egi - opex
             tax = 0.0
             noi_at = noi - tax
 
-            # debt
             if senior_amort == 0 or y <= senior_io:
                 interest = bal * senior_rate
                 principal = 0.0
@@ -437,15 +427,14 @@ def run_montecarlo(n_sims):
             dscr_path.append(dscr_val)
 
             op_cf = noi_at - ds
-            # accrue pref
             lp_pref_accrued += equity_lp * pref_annual
+
             lp_paid, gp_paid, lp_roc_remaining, lp_pref_accrued, residual_left = apply_periodic_waterfall(
                 op_cf, lp_roc_remaining, lp_pref_accrued, equity_lp, pref_annual, catchup_pct
             )
             lp_cf_sim.append(lp_paid)
             residual_acc += residual_left
 
-        # exit:
         cap_sim = safe_cap(exit_cap + cap_shock)
         exit_value = noi_at / cap_sim if cap_sim > 0 else 0.0
         exit_net = exit_value * (1 - selling_costs)
@@ -453,17 +442,122 @@ def run_montecarlo(n_sims):
         final_residual = residual_acc + exit_reversion
 
         lp_add, gp_add = settle_final_distribution(lp_cf_sim, [], final_residual, equity_lp, promote_tiers)
-        # add final settlement
         lp_cf_sim[-1] += lp_add
 
         irr_sim = robust_irr(lp_cf_sim)
         if not np.isnan(irr_sim) and irr_sim > -1:
-            irrs.append(irr_sim)
+            local_irrs.append(irr_sim)
 
         if any(d < 1.2 for d in dscr_path):
-            dscr_breach_count += 1
+            local_breaches += 1
 
-    return np.array(irrs), dscr_breach_count
+    return local_irrs, local_breaches
+
+# ---------------------------
+# Parallel run_montecarlo (integrated)
+# ---------------------------
+def run_montecarlo_parallel(n_sims: int, max_workers: int = None):
+    """
+    Parallel Monte Carlo runner using ProcessPoolExecutor.
+    Returns (np.array(irrs), dscr_breach_count)
+    """
+    if n_sims <= 0:
+        return np.array([]), 0
+
+    # Determine worker count
+    cpu_count = multiprocessing.cpu_count()
+    if max_workers is None:
+        max_workers = cpu_count
+    max_workers = min(max_workers, cpu_count)
+    # don't create more workers than sims
+    workers = min(max_workers, n_sims)
+
+    # chunk sims into roughly-even pieces
+    base = n_sims // workers
+    extras = n_sims % workers
+    sims_chunks = [base + (1 if i < extras else 0) for i in range(workers)]
+    seeds = [np.random.randint(0, 2**31 - 1) for _ in range(workers)]
+
+    # prepare args per worker (pack all required inputs)
+    senior_loan = total_cost * senior_ltv
+    senior_rate_local = senior_rate
+    senior_amort_local = senior_amort
+    senior_io_local = senior_io
+
+    worker_args = []
+    for chunk, seed in zip(sims_chunks, seeds):
+        if chunk == 0:
+            continue
+        worker_args.append((
+            seed,
+            chunk,
+            senior_loan,
+            senior_rate_local,
+            senior_amort_local,
+            senior_io_local,
+            gpr_y1,
+            rent_growth,
+            vacancy,
+            opex_y1,
+            opex_growth,
+            reserves,
+            hold,
+            exit_cap,
+            selling_costs,
+            pref_annual,
+            catchup_pct,
+            sigma_rent,
+            sigma_opex,
+            sigma_cap,
+            corr,
+            promote_tiers,
+            lp_share_default
+        ))
+
+    irrs_agg = []
+    breach_agg = 0
+
+    progress = st.progress(0)
+    completed = 0
+
+    # run in parallel processes
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as exe:
+            futures = [exe.submit(_monte_worker, *args) for args in worker_args]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    local_irrs, local_breaches = fut.result()
+                except Exception as e:
+                    # fallback: if a worker failed, treat its sims as no-results
+                    local_irrs, local_breaches = [], 0
+                    st.warning(f"A worker failed: {e}")
+                irrs_agg.extend(local_irrs)
+                breach_agg += local_breaches
+                completed += 1
+                progress.progress(min(1.0, completed / len(futures)))
+    except Exception as e:
+        # if multiprocessing fails (common on some platforms), fallback to serial run
+        st.warning(f"Parallel execution failed: {e}. Falling back to serial execution.")
+        irrs_agg = []
+        breach_agg = 0
+        # serial simulation (reuse previous logic)
+        for seed, chunk in zip(seeds, sims_chunks):
+            local_irrs, local_breaches = _monte_worker(seed, chunk,
+                                                       senior_loan, senior_rate_local,
+                                                       senior_amort_local, senior_io_local,
+                                                       gpr_y1, rent_growth, vacancy,
+                                                       opex_y1, opex_growth, reserves,
+                                                       hold, exit_cap, selling_costs,
+                                                       pref_annual, catchup_pct,
+                                                       sigma_rent, sigma_opex, sigma_cap,
+                                                       corr, promote_tiers, lp_share_default)
+            irrs_agg.extend(local_irrs)
+            breach_agg += local_breaches
+            completed += 1
+            progress.progress(min(1.0, completed / len(sims_chunks)))
+
+    progress.empty()
+    return np.array(irrs_agg), breach_agg
 
 # CSV sample generator (for reconciliation)
 def generate_sample_csv(cf_table):
@@ -503,7 +597,9 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
     # Monte Carlo (warn about time)
     st.info(f"Running Monte Carlo with {n_sims} sims — this may take time. Use fewer sims for quick iteration.")
     with st.spinner("Running Monte Carlo..."):
-        irrs, breaches = run_montecarlo(int(n_sims))
+        # Max workers default to CPU count for maximal parallelism
+        irrs, breaches = run_montecarlo_parallel(int(n_sims), max_workers=None)
+
     if irrs.size == 0:
         st.error("Monte Carlo produced no valid IRRs. Check inputs.")
     else:
@@ -535,4 +631,3 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
 
 st.markdown("---")
 st.info("This is an institutional-grade model with multi-tier promote settlement and test scaffolding. Adjust inputs in the sidebar and rerun.")
-

@@ -113,43 +113,38 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
             st.rerun()
 
     # HANDLE STRIPE CHECKOUT REDIRECT
-    if "pending_checkout" in st.session_state:
-        checkout = st.session_state.pending_checkout
-        del st.session_state.pending_checkout
+   if "pending_checkout" in st.session_state:
+    checkout = st.session_state.pending_checkout
+    del st.session_state.pending_checkout
 
-        STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
+    STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
 
-       js = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<script src="https://js.stripe.com/v3/"></script>
-</head>
-<body>
-<script>
-const stripe = Stripe('{STRIPE_PK}');
-stripe.redirectToCheckout({
-    lineItems: [{{ price: '{checkout["price"]}', quantity: 1 }}],
-    mode: 'payment',
-    successUrl: '{checkout["success_url"]}',
-    cancelUrl: '{checkout["cancel_url"]}',
-}).then(function (result) {{
-    if (result.error) {{
-        window.alert(result.error.message);
-    }}
-}});
-</script>
-</body>
-</html>
-"""
+    js = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <script src="https://js.stripe.com/v3/"></script>
+    </head>
+    <body>
+    <script>
+    const stripe = Stripe('{STRIPE_PK}');
+    stripe.redirectToCheckout({{
+        lineItems: [{{ price: '{checkout["price"]}', quantity: 1 }}],
+        mode: 'payment',
+        successUrl: '{checkout["success_url"]}',
+        cancelUrl: '{checkout["cancel_url"]}',
+    }}).then(function (result) {{
+        if (result.error) {{
+            window.alert(result.error.message);
+        }}
+    }});
+    </script>
+    </body>
+    </html>
+    """
 
-# IMPORTANT: height must be > 0 or Streamlit blocks the iframe/JS
-st.components.v1.html(js, height=50, width=200)
-st.stop()
-
-# ---------------------------
-# (The rest of your app continues below unchanged)
-# ---------------------------
+    st.components.v1.html(js, height=50)
+    st.stop()
 
 # ---------------------------
 # SIDEBAR INPUTS (including logo input)

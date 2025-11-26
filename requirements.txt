@@ -1,6 +1,7 @@
-streamlit==1.46.1
-numpy==1.26.4
-pandas==2.2.2
-plotly==5.24.1
-kaleido==0.2.1
-reportlab==4.2.2
+streamlit
+numpy
+pandas
+plotly
+reportlab
+kaleido
+numpy-financial  # this is the official new package

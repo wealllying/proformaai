@@ -60,8 +60,13 @@ except Exception:
     KALEIDO_AVAILABLE = False
 st.set_page_config(page_title="Pro Forma AI — Institutional (Full)", layout="wide")
 
-# ---------------------------
-# ---------------------------
+# --- SESSION STATE INITIALIZATION ---
+if "pending_checkout" not in st.session_state:
+    st.session_state.pending_checkout = False
+
+if "checkout_url" not in st.session_state:
+    st.session_state.checkout_url = ""
+
 # ---------------------------
 # ---------------------------
 # PAYWALL — FINAL 100% WORKING VERSION (Tested Nov 2025)

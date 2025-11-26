@@ -108,7 +108,8 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
                 "success_url": f"{APP_URL}?plan=one&token={VALID_TOKENS['one']}",
                 "cancel_url": APP_URL
             }
-            st.experimental_rerun()
+            st.rerun()
+
 
     with col2:
         if st.button("Unlimited — $99,000/year", type="primary", use_container_width=True, key="annual"):
@@ -117,7 +118,8 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
                 "success_url": f"{APP_URL}?plan=annual&token={VALID_TOKENS['annual']}",
                 "cancel_url": APP_URL
             }
-            st.experimental_rerun()
+            st.rerun()
+
 
     # If pending_checkout exists, create a small HTML component that immediately calls Stripe Checkout (client-side).
     # This avoids needing the stripe python package, works in Streamlit, and prevents server-side secret exposure.

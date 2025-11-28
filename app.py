@@ -1,13 +1,15 @@
 # app.py — Pro Forma AI — INSTITUTIONAL-GRADE — FULL (with mezz, pref, IRR-hurdle promotes, tests, CSV)
 # Run: streamlit run app.py
+
+import os
 import streamlit as st
 import numpy as np
-# === FIXED: Safe numpy_financial (works on Streamlit Cloud too) ===
+# === SAFE numpy_financial (works on Streamlit Cloud too) ===
 try:
     import numpy_financial as npf
-except ImportError:
-    import numpy as np
-    npf = np.financial if hasattr(np, 'financial') else None
+except Exception:
+    import numpy as _np
+    npf = _np.financial if hasattr(_np, 'financial') else None
     if npf is None:
         import math
         def pmt(rate, nper, pv, fv=0, when='end'):
@@ -30,6 +32,7 @@ except ImportError:
                 r -= f / df
             return r if abs(npv(r)) < 1e6 else None
         npf = type('npf', (), {'pmt': pmt, 'irr': irr})()
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -63,173 +66,227 @@ except Exception:
 
 st.set_page_config(page_title="Pro Forma AI — Institutional (Full)", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
+# ---------------------------------------------------------
+# STRIPE / PAYWALL CONFIG (from environment variables)
+# ---------------------------------------------------------
+# Recommended: set these in your Railway / hosting env vars
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")     # server-side creation (optional)
+STRIPE_PK = os.getenv("STRIPE_PK", "")                     # client-side (publishable) fallback
+ONE_DEAL_PRICE_ID = os.getenv("ONE_DEAL_PRICE_ID", "price_1SVfkUH2h13vRbN8zuo69kgv")
+ANNUAL_PRICE_ID = os.getenv("ANNUAL_PRICE_ID", "price_1SXqY7H2h13vRbN8k0wC7IEx")
+APP_URL = os.getenv("APP_URL", "https://proforma-ai-production.up.railway.app/")
+
+# Try to import stripe python package — if present we'll use it for server-side session creation.
+stripe = None
+try:
+    import stripe as _stripe
+    stripe = _stripe
+    if STRIPE_SECRET_KEY:
+        stripe.api_key = STRIPE_SECRET_KEY
+except Exception:
+    stripe = None
+
+# ---------------------------
+# SESSION STATE INIT
+# ---------------------------
 if "pending_checkout" not in st.session_state:
-    st.session_state.pending_checkout = None  # will hold dict when user clicks a payment option
+    st.session_state.pending_checkout = None
 
 # ---------------------------
+# PAYWALL — VALID TOKENS (for query param unlock)
 # ---------------------------
-# PAYWALL — FINAL 100% WORKING VERSION (Tested Nov 2025)
-# ---------------------------
-ONE_DEAL_PRICE_ID = "price_1SVfkUH2h13vRbN8zuo69kgv"      # example — replace with your real Price ID
-ANNUAL_PRICE_ID = "price_1SXqY7H2h13vRbN8k0wC7IEx"         # example — replace with your real Price ID
-
-# CHANGE THESE — make them random & long
 VALID_TOKENS = {
-    "one": "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3",
-    "annual": "supersecret-annual-2025-h4j6k8m1p3q5r7t9"
+    "one": os.getenv("VALID_TOKEN_ONE", "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3"),
+    "annual": os.getenv("VALID_TOKEN_ANNUAL", "supersecret-annual-2025-h4j6k8m1p3q5r7t9")
 }
 
-# ←←←←← CHANGE THIS — YOUR REAL DEPLOYED URL (copy from browser)
-APP_URL = "https://proforma-ai-production.up.railway.app/"   # ←←←←← CHANGE
-
-# ---------- IMPORTANT: STRIPE PUBLISHABLE KEY ----------
-# Put your Stripe publishable key here (pk_test_... or pk_live_...). Do NOT put your SECRET key here.
-STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
-
 # ---------------------------
-# PAYWALL — FIXED QUERY PARAMS + RELIABLE UNLOCK
+# QUERY PARAMS (unlock detection)
 # ---------------------------
-
-# Correct Streamlit query param handling
 qp = st.query_params
 plan = qp.get("plan", None)
 token = qp.get("token", None)
 
-# Validate access
-if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
+# If user already has valid query params, show app (skip paywall)
+has_access = False
+if plan and token:
+    p = plan[0] if isinstance(plan, list) else plan
+    t = token[0] if isinstance(token, list) else token
+    if p in VALID_TOKENS and t == VALID_TOKENS[p]:
+        has_access = True
+
+# ---------------------------
+# PAYWALL UI / BUTTONS
+# ---------------------------
+if not has_access:
     st.title("Pro Forma AI — Institutional Access Required")
     st.markdown("### Unlock Full Model Instantly")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button("One Deal — $999", type="primary", use_container_width=True, key="one"):
+        if st.button("One Deal — $999", key="one_btn", use_container_width=True):
+            # Prepare checkout data
             st.session_state.pending_checkout = {
-                "price": ONE_DEAL_PRICE_ID,
+                "price_id": ONE_DEAL_PRICE_ID,
                 "success_url": f"{APP_URL}?plan=one&token={VALID_TOKENS['one']}",
                 "cancel_url": APP_URL
             }
+            # rerun to hit the pending_checkout handler below
             st.rerun()
 
     with col2:
-        if st.button("Unlimited — $99,000/year", type="primary", use_container_width=True, key="annual"):
+        if st.button("Unlimited — $99,000/year", key="annual_btn", use_container_width=True):
             st.session_state.pending_checkout = {
-                "price": ANNUAL_PRICE_ID,
+                "price_id": ANNUAL_PRICE_ID,
                 "success_url": f"{APP_URL}?plan=annual&token={VALID_TOKENS['annual']}",
                 "cancel_url": APP_URL
             }
             st.rerun()
 
-    # If pending_checkout exists, create a small HTML component that immediately calls Stripe Checkout (client-side).
-    # This avoids needing the stripe python package, works in Streamlit, and prevents server-side secret exposure.
+    # If a pending checkout dict exists, attempt to redirect to Stripe Checkout.
     if st.session_state.pending_checkout:
         checkout = st.session_state.pending_checkout
-        # Build JS that uses Stripe JS to redirect to Checkout
-        js = f"""
-        <script src="https://js.stripe.com/v3/"></script>
-        <script>
-        (function() {{
-            var stripe = Stripe("{STRIPE_PK}");
-            stripe.redirectToCheckout({{
-                lineItems: [{{ price: "{checkout['price']}", quantity: 1 }}],
-                mode: 'payment',
-                successUrl: "{checkout['success_url']}",
-                cancelUrl: "{checkout['cancel_url']}"
-            }}).then(function(result) {{
-                if (result.error) {{
-                    // show error to the user
-                    var el = document.createElement('div');
-                    el.style.padding = '12px';
-                    el.style.background = '#fee';
-                    el.style.border = '1px solid #f99';
-                    el.innerText = result.error.message || 'Stripe checkout error';
-                    document.body.appendChild(el);
-                }}
-            }});
-        }})();
-        </script>
-        """
-        # height must be > 0 otherwise some browsers/Streamlit block the iframe/JS execution
-        st.components.v1.html(js, height=200)
-        # clear pending_checkout so UI doesn't re-show it on rerun
-        st.session_state.pending_checkout = None
-        st.stop()  # stop executing rest of the app for the paywall view
+        price_id = checkout.get("price_id")
+        success_url = checkout.get("success_url")
+        cancel_url = checkout.get("cancel_url")
+
+        # Preferred: server-side session creation via stripe package + secret key
+        if stripe is not None and STRIPE_SECRET_KEY:
+            try:
+                session = stripe.checkout.Session.create(
+                    mode="payment",
+                    payment_method_types=["card"],
+                    line_items=[{"price": price_id, "quantity": 1}],
+                    success_url=success_url,
+                    cancel_url=cancel_url,
+                )
+                # Meta refresh redirect (works in Streamlit)
+                st.markdown(f'<meta http-equiv="refresh" content="0; url={session.url}">', unsafe_allow_html=True)
+                # Clear state and stop
+                st.session_state.pending_checkout = None
+                st.stop()
+            except Exception as e:
+                st.error(f"Stripe server-side session error: {e}")
+                st.session_state.pending_checkout = None
+                # fall through to client-side attempt if possible
+
+        # Fallback: client-side redirect using STRIPE_PK and Stripe.js (no python stripe package required)
+        if STRIPE_PK:
+            # Build JS that calls stripe.redirectToCheckout with price id
+            # Must use st.components.v1.html to inject and run
+            js = f"""
+            <script src="https://js.stripe.com/v3/"></script>
+            <script>
+            (function() {{
+                var stripe = Stripe("{STRIPE_PK}");
+                stripe.redirectToCheckout({{
+                  lineItems: [{{ price: "{price_id}", quantity: 1 }}],
+                  mode: "payment",
+                  successUrl: "{success_url}",
+                  cancelUrl: "{cancel_url}"
+                }}).then(function (result) {{
+                    if (result && result.error) {{
+                        var el = document.createElement('div');
+                        el.style.padding = '12px';
+                        el.style.background = '#fee';
+                        el.style.border = '1px solid #f99';
+                        el.innerText = result.error.message || 'Stripe redirect error';
+                        document.body.appendChild(el);
+                    }}
+                }});
+            }})();
+            </script>
+            """
+            # Render HTML (height must be > 0)
+            st.components.v1.html(js, height=200)
+            st.session_state.pending_checkout = None
+            st.stop()
+
+        # If neither server nor client approach available, instruct the developer
+        st.error("Stripe not configured. Set STRIPE_SECRET_KEY (and install stripe) or STRIPE_PK in environment variables.")
+        st.stop()
 
 # ---------------------------
-# SIDEBAR INPUTS (including logo input)
+# --- The rest of your app (sidebar inputs, modeling, Monte Carlo, PDF generation, etc.)
 # ---------------------------
-with st.sidebar:
-    st.header("Acquisition & Capital Stack")
-    purchase_price = st.number_input("Purchase Price ($)", value=100_000_000, step=1_000_000)
-    closing_costs_pct = st.slider("Closing Costs %", 0.0, 5.0, 1.5) / 100.0
-    total_cost = purchase_price * (1 + closing_costs_pct)
-    # Debt
-    st.subheader("Senior Loan")
-    senior_ltv = st.slider("Senior LTV %", 0.0, 90.0, 60.0) / 100.0
-    senior_rate = st.slider("Senior Interest Rate (annual %)", 0.5, 12.0, 5.5, 0.05) / 100.0
-    senior_amort = st.number_input("Senior Amortization (years, 0=IO)", 0, 30, 25)
-    senior_term = st.number_input("Senior Term (years)", 1, 30, 25)
-    senior_io = st.number_input("Senior IO Period (years)", 0, min(10, senior_term), 0)
-    st.subheader("Mezz / Subordinate (optional)")
-    use_mezz = st.checkbox("Include Mezz", value=False)
-    if use_mezz:
-        mezz_pct = st.slider("Mezz % of Cost", 0.0, 40.0, 10.0) / 100.0
-        mezz_rate = st.slider("Mezz Rate %", 0.0, 20.0, 10.0) / 100.0
-        mezz_term = st.number_input("Mezz Term (years)", 1, 10, 5)
-    else:
-        mezz_pct = 0.0
-        mezz_rate = 0.0
-        mezz_term = 0
-    st.subheader("Equity")
-    total_equity = total_cost * (1 - senior_ltv - (mezz_pct if use_mezz else 0.0))
-    st.markdown(f"Estimated equity required: **${total_equity:,.0f}**")
-    lp_share_default = st.slider("LP % of Equity (rest is GP)", 50, 95, 80) / 100.0
-    st.header("Operating Assumptions")
-    gpr_y1 = st.number_input("Year 1 GPR ($)", value=12_000_000, step=10000)
-    rent_growth = st.slider("Rent Growth %", 0.0, 8.0, 3.0, 0.1) / 100.0
-    vacancy = st.slider("Vacancy %", 0.0, 20.0, 5.0, 0.1) / 100.0
-    opex_y1 = st.number_input("Year 1 OpEx ($)", value=3_600_000, step=10000)
-    opex_growth = st.slider("OpEx Growth %", 0.0, 8.0, 2.5, 0.1) / 100.0
-    reserves = st.number_input("Annual Reserves/CapEx ($)", value=400_000, step=10000)
-    st.header("Exit & Waterfall")
-    hold = st.slider("Hold Period (years)", 1, 10, 5)
-    exit_cap = st.slider("Exit Cap %", 3.0, 12.0, 5.5, 0.05) / 100.0
-    selling_costs = st.slider("Selling Costs %", 0.0, 8.0, 5.0) / 100.0
-    pref_annual = st.slider("Preferred Return (LP annual %)", 0.0, 15.0, 8.0, 0.1) / 100.0
-    catchup_pct = st.slider("Catch-up % to GP after pref", 0.0, 100.0, 0.0, 1.0) / 100.0
-    st.markdown("### Promote tiers (IRR-hurdle driven)")
-    use_promote = st.checkbox("Enable promote tiers", True)
-    if use_promote:
-        tier1_hurdle = st.number_input("Tier1 Hurdle IRR (%)", value=12.0, step=0.5) / 100.0
-        tier1_gp = st.number_input("Tier1 GP % of residual", value=30.0, step=1.0) / 100.0
-        tier2_hurdle = st.number_input("Tier2 Hurdle IRR (%)", value=20.0, step=0.5) / 100.0
-        tier2_gp = st.number_input("Tier2 GP % of residual", value=50.0, step=1.0) / 100.0
-        promote_tiers = [(tier1_hurdle, tier1_gp), (tier2_hurdle, tier2_gp)]
-    else:
-        promote_tiers = None
-    st.header("Monte Carlo & Performance")
-    n_sims = st.number_input("Monte Carlo sims", min_value=500, max_value=20000, value=5000, step=500)
-    sigma_rent = st.slider("Rent vol (σ)", 0.0, 0.25, 0.02, 0.005)
-    sigma_opex = st.slider("OpEx vol (σ)", 0.0, 0.25, 0.015, 0.005)
-    sigma_cap = st.slider("Cap vol (σ)", 0.0, 0.10, 0.004, 0.001)
-    corr = np.array([[1.0, 0.2, -0.4],
-                     [0.2, 1.0, -0.2],
-                     [-0.4, -0.2, 1.0]])
-    st.header("Report branding")
-    logo_mode = st.selectbox("Logo input", options=["None", "Upload file (PNG/JPG)", "Provide image URL"])
-    logo_file = None
-    logo_url = None
-    if logo_mode == "Upload file (PNG/JPG)":
-        logo_file = st.file_uploader("Upload logo", type=["png", "jpg", "jpeg"])
-    elif logo_mode == "Provide image URL":
-        logo_url = st.text_input("Logo image URL[](https://...)")
+# If we've reached here, the user has access (either via query params or after payment)
+st.sidebar.header("Acquisition & Capital Stack")
+
+purchase_price = st.sidebar.number_input("Purchase Price ($)", value=100_000_000, step=1_000_000)
+closing_costs_pct = st.sidebar.slider("Closing Costs %", 0.0, 5.0, 1.5) / 100.0
+total_cost = purchase_price * (1 + closing_costs_pct)
+# Debt
+st.sidebar.subheader("Senior Loan")
+senior_ltv = st.sidebar.slider("Senior LTV %", 0.0, 90.0, 60.0) / 100.0
+senior_rate = st.sidebar.slider("Senior Interest Rate (annual %)", 0.5, 12.0, 5.5, 0.05) / 100.0
+senior_amort = st.sidebar.number_input("Senior Amortization (years, 0=IO)", 0, 30, 25)
+senior_term = st.sidebar.number_input("Senior Term (years)", 1, 30, 25)
+senior_io = st.sidebar.number_input("Senior IO Period (years)", 0, min(10, senior_term), 0)
+st.sidebar.subheader("Mezz / Subordinate (optional)")
+use_mezz = st.sidebar.checkbox("Include Mezz", value=False)
+if use_mezz:
+    mezz_pct = st.sidebar.slider("Mezz % of Cost", 0.0, 40.0, 10.0) / 100.0
+    mezz_rate = st.sidebar.slider("Mezz Rate %", 0.0, 20.0, 10.0) / 100.0
+    mezz_term = st.sidebar.number_input("Mezz Term (years)", 1, 10, 5)
+else:
+    mezz_pct = 0.0
+    mezz_rate = 0.0
+    mezz_term = 0
+
+st.sidebar.subheader("Equity")
+total_equity = total_cost * (1 - senior_ltv - (mezz_pct if use_mezz else 0.0))
+st.sidebar.markdown(f"Estimated equity required: **${total_equity:,.0f}**")
+lp_share_default = st.sidebar.slider("LP % of Equity (rest is GP)", 50, 95, 80) / 100.0
+
+st.sidebar.header("Operating Assumptions")
+gpr_y1 = st.sidebar.number_input("Year 1 GPR ($)", value=12_000_000, step=10000)
+rent_growth = st.sidebar.slider("Rent Growth %", 0.0, 8.0, 3.0, 0.1) / 100.0
+vacancy = st.sidebar.slider("Vacancy %", 0.0, 20.0, 5.0, 0.1) / 100.0
+opex_y1 = st.sidebar.number_input("Year 1 OpEx ($)", value=3_600_000, step=10000)
+opex_growth = st.sidebar.slider("OpEx Growth %", 0.0, 8.0, 2.5, 0.1) / 100.0
+reserves = st.sidebar.number_input("Annual Reserves/CapEx ($)", value=400_000, step=10000)
+
+st.sidebar.header("Exit & Waterfall")
+hold = st.sidebar.slider("Hold Period (years)", 1, 10, 5)
+exit_cap = st.sidebar.slider("Exit Cap %", 3.0, 12.0, 5.5, 0.05) / 100.0
+selling_costs = st.sidebar.slider("Selling Costs %", 0.0, 8.0, 5.0) / 100.0
+pref_annual = st.sidebar.slider("Preferred Return (LP annual %)", 0.0, 15.0, 8.0, 0.1) / 100.0
+catchup_pct = st.sidebar.slider("Catch-up % to GP after pref", 0.0, 100.0, 0.0, 1.0) / 100.0
+
+st.sidebar.markdown("### Promote tiers (IRR-hurdle driven)")
+use_promote = st.sidebar.checkbox("Enable promote tiers", True)
+if use_promote:
+    tier1_hurdle = st.sidebar.number_input("Tier1 Hurdle IRR (%)", value=12.0, step=0.5) / 100.0
+    tier1_gp = st.sidebar.number_input("Tier1 GP % of residual", value=30.0, step=1.0) / 100.0
+    tier2_hurdle = st.sidebar.number_input("Tier2 Hurdle IRR (%)", value=20.0, step=0.5) / 100.0
+    tier2_gp = st.sidebar.number_input("Tier2 GP % of residual", value=50.0, step=1.0) / 100.0
+    promote_tiers = [(tier1_hurdle, tier1_gp), (tier2_hurdle, tier2_gp)]
+else:
+    promote_tiers = None
+
+st.sidebar.header("Monte Carlo & Performance")
+n_sims = st.sidebar.number_input("Monte Carlo sims", min_value=500, max_value=20000, value=5000, step=500)
+sigma_rent = st.sidebar.slider("Rent vol (σ)", 0.0, 0.25, 0.02, 0.005)
+sigma_opex = st.sidebar.slider("OpEx vol (σ)", 0.0, 0.25, 0.015, 0.005)
+sigma_cap = st.sidebar.slider("Cap vol (σ)", 0.0, 0.10, 0.004, 0.001)
+corr = np.array([[1.0, 0.2, -0.4],
+                 [0.2, 1.0, -0.2],
+                 [-0.4, -0.2, 1.0]])
+
+st.sidebar.header("Report branding")
+logo_mode = st.sidebar.selectbox("Logo input", options=["None", "Upload file (PNG/JPG)", "Provide image URL"])
+logo_file = None
+logo_url = None
+if logo_mode == "Upload file (PNG/JPG)":
+    logo_file = st.sidebar.file_uploader("Upload logo", type=["png", "jpg", "jpeg"])
+elif logo_mode == "Provide image URL":
+    logo_url = st.sidebar.text_input("Logo image URL[](https://...)")
 
 # ---------------------------
-# Helper functions
+# Helper functions (unchanged from your original code)
 # ---------------------------
 def robust_irr(cfs):
-    """Robust IRR wrapper: use npf.irr + bisection fallback."""
     try:
         irr = npf.irr(cfs)
         if irr is None or np.isnan(irr) or np.isinf(irr):
@@ -269,7 +326,6 @@ def safe_cap(rate):
     return min(max(rate, 0.03), 0.30)
 
 def compute_amort_schedule(loan, rate, amort_years, years):
-    """Return arrays for balances, interest, principal, payment for 'years' periods (annualized)."""
     balances = []
     interests = []
     principals = []
@@ -292,9 +348,6 @@ def compute_amort_schedule(loan, rate, amort_years, years):
         bal = max(bal - principal, 0.0)
     return balances, interests, principals, payments
 
-# ---------------------------
-# Institutional waterfall settlement (improved)
-# ---------------------------
 def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, equity_lp, promote_tiers):
     if remaining_residual <= 0 or promote_tiers is None or len(promote_tiers) == 0:
         lp_share = 0.8
@@ -302,8 +355,7 @@ def settle_final_distribution(lp_cf_so_far, gp_cf_so_far, remaining_residual, eq
     lp_add_total = 0.0
     gp_add_total = 0.0
     residual_left = remaining_residual
-    lp_so_far = lp_cf_so_far.copy()
-    lp_so_far = [float(x) for x in lp_so_far]
+    lp_so_far = [float(x) for x in lp_cf_so_far]
     for (hurdle, gp_pct) in promote_tiers:
         if residual_left <= 0:
             break
@@ -709,7 +761,7 @@ def generate_pdf_report(det, monte_stats, fig_monte, fig_waterfall, logo_blob_tu
                 f"P95 (MC): {monte_stats.get('p95', 'N/A')}\n")
         return text.encode("utf-8"), f"Pro_Forma_AI_Summary_{datetime.today().strftime('%Y%m%d')}.txt"
 
-# Main run button and outputs
+# Main action button to run model
 if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
     with st.spinner("Running deterministic build..."):
         det = build_model_and_settle_det()
@@ -750,9 +802,11 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         cc2.metric("P50", f"{p50:.2%}")
         cc3.metric("P95", f"{p95:.2%}")
         st.metric("Probability DSCR < 1.2", f"{breaches / max(1, int(n_sims)):.1%}")
+
         fig_monte = px.histogram(irrs*100, nbins=80, title="LP IRR Distribution (Monte Carlo)")
         fig_monte.add_vline(x=p50*100, line_color="white", line_width=3)
         st.plotly_chart(fig_monte, use_container_width=True)
+
         try:
             op_sum = sum([x for x in det['lp_cfs'][1:-1]]) if len(det['lp_cfs'])>2 else 0
             wf = go.Figure(go.Waterfall(
@@ -807,7 +861,7 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
             "p95": monte_stats.get('p95'),
             "min_dscr": f"{min(dscr_path):.2f}x" if dscr_path else "N/A",
         }
-        requests.post("https://proforma-ai-production.up.railway.app/api/pdf", json=payload, timeout=8)
+        requests.post(f"{APP_URL.rstrip('/')}/api/pdf", json=payload, timeout=8)
     except Exception:
         pass
 

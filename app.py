@@ -41,6 +41,7 @@ import io
 import csv
 from io import BytesIO
 import textwrap
+
 # Optional PDF/image libs
 try:
     from reportlab.pdfgen import canvas
@@ -52,6 +53,7 @@ try:
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
+
 # Plotly to image (kaleido)
 KALEIDO_AVAILABLE = True
 try:
@@ -82,7 +84,7 @@ VALID_TOKENS = {
 APP_URL = "https://proforma-ai-production.up.railway.app/"   # ←←←←← CHANGE
 
 # ---------- IMPORTANT: STRIPE PUBLISHABLE KEY ----------
-# Put your Stripe publishable key here (pk_test_... or pk_live_...). Do NOT put your secret key in client-side code.
+# Put your Stripe publishable key here (pk_test_... or pk_live_...). Do NOT put your SECRET key here.
 STRIPE_PK = "pk_live_51QdMi2H2h13vRbN80Zwsq2u9w5hR7KfjAm3CdCJL8f2obnEH0SBfga6CbFXDXRsq731AJzJ9NQJtPT5WGhl6Z1gm00gs9OEjIE"
 
 # ---------------------------
@@ -110,7 +112,6 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
             }
             st.rerun()
 
-
     with col2:
         if st.button("Unlimited — $99,000/year", type="primary", use_container_width=True, key="annual"):
             st.session_state.pending_checkout = {
@@ -119,7 +120,6 @@ if plan not in VALID_TOKENS or token != VALID_TOKENS[plan]:
                 "cancel_url": APP_URL
             }
             st.rerun()
-
 
     # If pending_checkout exists, create a small HTML component that immediately calls Stripe Checkout (client-side).
     # This avoids needing the stripe python package, works in Streamlit, and prevents server-side secret exposure.
@@ -587,8 +587,20 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
     for b in bullets:
         story.append(Paragraph(f"• {b}", normal))
     story.append(Spacer(1, 12))
-
-    # Deterministic cashflows table(s)
+    story.append(PageBreak())
+    story.append(Paragraph("Key Assumptions", styles['Heading2']))
+    asum_lines = [
+        f"GPR Year 1: ${gpr_y1:,.0f}",
+        f"Rent Growth (annual): {rent_growth:.2%}",
+        f"Vacancy: {vacancy:.2%}",
+        f"OpEx Year1: ${opex_y1:,.0f}",
+        f"OpEx growth: {opex_growth:.2%}",
+        f"Reserves/CapEx: ${reserves:,.0f}",
+        f"Senior Rate: {senior_rate:.2%} | Senior Amort: {senior_amort} yrs | IO: {senior_io} yrs",
+    ]
+    for a in asum_lines:
+        story.append(Paragraph(a, normal))
+    story.append(Spacer(1, 12))
     story.append(PageBreak())
     story.append(Paragraph("Deterministic Cashflows (LP & GP)", styles['Heading2']))
     df = det['cf_table'].copy()
@@ -609,8 +621,6 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
         story.append(Spacer(1, 8))
         if idx < len(parts) - 1:
             story.append(PageBreak())
-
-    # Monte Carlo section
     story.append(PageBreak())
     story.append(Paragraph("Monte Carlo Analysis — LP IRR Distribution", styles['Heading2']))
     st_lines = [
@@ -621,7 +631,6 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
     for line in st_lines:
         story.append(Paragraph(line, normal))
     story.append(Spacer(1, 12))
-
     try:
         png_hist = figure_to_png_bytes(fig_monte) if fig_monte is not None else None
         png_wf = figure_to_png_bytes(fig_waterfall) if fig_waterfall is not None else None
@@ -637,7 +646,6 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
             story.append(Spacer(1, 6))
     except Exception:
         pass
-
     story.append(PageBreak())
     story.append(Paragraph("Waterfall Mechanics & Promote Tiers", styles['Heading2']))
     wf_text = "Promote tiers (IRR-hurdle driven):\n"
@@ -649,7 +657,6 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
     story.append(Paragraph(wf_text.replace("\n", "<br/>"), normal))
     story.append(Spacer(1, 12))
     story.append(PageBreak())
-
     story.append(Paragraph("Appendix: Full Inputs & Notes", styles['Heading2']))
     inputs_summary = [
         f"Purchase price: ${purchase_price:,.0f}",
@@ -702,7 +709,7 @@ def generate_pdf_report(det, monte_stats, fig_monte, fig_waterfall, logo_blob_tu
                 f"P95 (MC): {monte_stats.get('p95', 'N/A')}\n")
         return text.encode("utf-8"), f"Pro_Forma_AI_Summary_{datetime.today().strftime('%Y%m%d')}.txt"
 
-# Main Run button
+# Main run button and outputs
 if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
     with st.spinner("Running deterministic build..."):
         det = build_model_and_settle_det()
@@ -743,11 +750,9 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         cc2.metric("P50", f"{p50:.2%}")
         cc3.metric("P95", f"{p95:.2%}")
         st.metric("Probability DSCR < 1.2", f"{breaches / max(1, int(n_sims)):.1%}")
-
         fig_monte = px.histogram(irrs*100, nbins=80, title="LP IRR Distribution (Monte Carlo)")
         fig_monte.add_vline(x=p50*100, line_color="white", line_width=3)
         st.plotly_chart(fig_monte, use_container_width=True)
-
         try:
             op_sum = sum([x for x in det['lp_cfs'][1:-1]]) if len(det['lp_cfs'])>2 else 0
             wf = go.Figure(go.Waterfall(

@@ -1,8 +1,8 @@
 # app.py — Pro Forma AI — Institutional (Full)
 # Run: streamlit run app.py
-# Minimal client-side Stripe Checkout (success => ?unlocked=1)
+# Minimal client-side Stripe Checkout (Option A)
 # Required env vars: ONE_DEAL_PRICE_ID, ANNUAL_PRICE_ID, APP_URL, STRIPE_PK
-# Optional: STRIPE_SECRET_KEY, PROFORMA_LOGFILE, MASTER_SIG
+# Optional: STRIPE_SECRET_KEY (not used for client-only), PROFORMA_LOGFILE, MASTER_SIG, VALID_TOKEN_ONE, VALID_TOKEN_ANNUAL
 
 import os
 import logging
@@ -45,8 +45,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.StreamHandler(),                # to stdout (visible in Railway logs)
-        logging.FileHandler(LOGFILE, mode="a")  # file in container
+        logging.StreamHandler(),                # visible in platform logs
+        logging.FileHandler(LOGFILE, mode="a")  # saved inside container
     ],
 )
 logger = logging.getLogger("proforma")
@@ -57,18 +57,18 @@ logger.info("Starting Pro Forma AI app")
 # -------------------------
 ONE_DEAL_PRICE_ID = os.getenv("ONE_DEAL_PRICE_ID")
 ANNUAL_PRICE_ID = os.getenv("ANNUAL_PRICE_ID")
-APP_URL = os.getenv("APP_URL", "")
+APP_URL = os.getenv("APP_URL", "").rstrip("/")
 STRIPE_PK = os.getenv("STRIPE_PK")
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")  # optional
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")  # optional, not used for client-only
 MASTER_SIG = os.getenv("MASTER_SIG")  # optional admin override
 
-# Example fallback tokens (for convenience; move to env for production)
+# Optional valid tokens (move to env in production)
 VALID_TOKENS = {
     "one": os.getenv("VALID_TOKEN_ONE", "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3"),
     "annual": os.getenv("VALID_TOKEN_ANNUAL", "supersecret-annual-2025-h4j6k8m1p3q5r7t9")
 }
 
-logger.debug("Env flags: ONE_DEAL=%s ANNUAL=%s APP_URL=%s STRIPE_PK=%s",
+logger.debug("Env loaded: ONE_DEAL=%s ANNUAL=%s APP_URL=%s STRIPE_PK=%s",
              bool(ONE_DEAL_PRICE_ID), bool(ANNUAL_PRICE_ID), bool(APP_URL), bool(STRIPE_PK))
 
 # -------------------------
@@ -77,7 +77,7 @@ logger.debug("Env flags: ONE_DEAL=%s ANNUAL=%s APP_URL=%s STRIPE_PK=%s",
 st.set_page_config(page_title="Pro Forma AI — Institutional (Full)", layout="wide")
 st.title("Pro Forma AI — Institutional (Full)")
 
-# ---- small env debug panel so you can verify Railway variables easily ----
+# Small expand to show environment debug (handy on Railway)
 with st.expander("Debug / Environment (click to expand)"):
     st.write({
         "ONE_DEAL_PRICE_ID": bool(ONE_DEAL_PRICE_ID),
@@ -118,14 +118,14 @@ def unlocked_via_plan_token(plan_arg, token_arg):
     if not plan_arg or not token_arg:
         return False
     ok = plan_arg in VALID_TOKENS and token_arg == VALID_TOKENS[plan_arg]
-    logger.debug("Query unlock: plan=%s token_present=%s valid=%s", plan_arg, bool(token_arg), ok)
+    logger.debug("Query unlock attempt: plan=%s token_present=%s valid=%s", plan_arg, bool(token_arg), ok)
     return ok
 
 def unlocked_via_master_sig(sig_arg):
     if not sig_arg:
         return False
     if MASTER_SIG and sig_arg == MASTER_SIG:
-        logger.debug("Master sig matched")
+        logger.debug("Master signature matched")
         return True
     return False
 
@@ -137,7 +137,7 @@ def unlocked_via_success_flag(flag):
 IS_UNLOCKED = unlocked_via_plan_token(plan_q, token_q) or unlocked_via_master_sig(sig_q) or unlocked_via_success_flag(unlocked_q)
 if IS_UNLOCKED:
     st.success("Full model unlocked.")
-    logger.info("Access unlocked (plan=%s unlocked_flag=%s sig=%s)", plan_q, unlocked_q, bool(sig_q))
+    logger.info("Access unlocked (plan=%s unlocked=%s sig_present=%s)", plan_q, unlocked_q, bool(sig_q))
 else:
     # ----- PAYWALL UI -----
     st.header("Pro Forma AI — Institutional Access Required")
@@ -148,7 +148,6 @@ else:
 
     def stripe_checkout_js(price_id, success_url, cancel_url):
         """Return HTML+JS string that executes Stripe redirectToCheckout() using publishable key"""
-        # ensure quotes escaped safely - we use f-strings directly since values expected safe (env)
         return f"""
         <script src="https://js.stripe.com/v3/"></script>
         <script>
@@ -182,42 +181,42 @@ else:
         </script>
         """
 
-    # Buttons create client-side redirect JS — minimal and robust
+    # Buttons produce client-side redirect
     with col1:
         if st.button("One Deal — $999", key="pay_one"):
             logger.info("One Deal button pressed")
             if not (STRIPE_PK and ONE_DEAL_PRICE_ID and APP_URL):
                 st.error("Stripe config incomplete. Ensure STRIPE_PK, ONE_DEAL_PRICE_ID and APP_URL are set in env.")
-                logger.error("Incomplete Stripe env variables on One Deal click")
+                logger.error("Incomplete Stripe env on One Deal click")
             else:
-                success_url = f"{APP_URL.rstrip('/')}/?unlocked=1"
-                cancel_url = APP_URL
+                # successUrl uses unlocked flag so Stripe redirect brings user back with ?unlocked=1
+                success_url = f"{APP_URL}/?unlocked=1&plan=one"
+                cancel_url = APP_URL or ""
                 js = stripe_checkout_js(ONE_DEAL_PRICE_ID, success_url, cancel_url)
                 st.components.v1.html(js, height=220)
-                logger.debug("Injected Stripe JS (One Deal).")
+                logger.debug("Injected Stripe JS (One Deal)")
 
     with col2:
         if st.button("Unlimited — $99,000/year", key="pay_annual"):
             logger.info("Annual button pressed")
             if not (STRIPE_PK and ANNUAL_PRICE_ID and APP_URL):
                 st.error("Stripe config incomplete. Ensure STRIPE_PK, ANNUAL_PRICE_ID and APP_URL are set in env.")
-                logger.error("Incomplete Stripe env variables on Annual click")
+                logger.error("Incomplete Stripe env on Annual click")
             else:
-                success_url = f"{APP_URL.rstrip('/')}/?unlocked=1"
-                cancel_url = APP_URL
+                success_url = f"{APP_URL}/?unlocked=1&plan=annual"
+                cancel_url = APP_URL or ""
                 js = stripe_checkout_js(ANNUAL_PRICE_ID, success_url, cancel_url)
                 st.components.v1.html(js, height=220)
-                logger.debug("Injected Stripe JS (Annual).")
+                logger.debug("Injected Stripe JS (Annual)")
 
-    # Stop the script here so paywall is the only thing shown
     st.stop()
 
 # ---------------------------
-# If we reach here the app is UNLOCKED and will render the full model
+# Unlocked app content starts here
 # ---------------------------
 
 # ---------------------------
-# Sidebar inputs (kept from your original)
+# Sidebar inputs (kept from original)
 # ---------------------------
 with st.sidebar:
     st.header("Acquisition & Capital Stack")
@@ -813,6 +812,7 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         ))
         wf.update_layout(title="Deterministic LP Waterfall", template="plotly_white")
 
+        # Present charts (UI)
         st.plotly_chart(fig_monte, use_container_width=True)
         st.plotly_chart(wf, use_container_width=True)
         fig_waterfall = wf
@@ -862,10 +862,10 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
             "p95": monte_stats.get('p95'),
             "min_dscr": f"{min(dscr_path):.2f}x" if dscr_path else "N/A",
         }
-        requests.post(f"{APP_URL.rstrip('/')}/api/pdf", json=payload, timeout=4)
+        if APP_URL:
+            requests.post(f"{APP_URL.rstrip('/')}/api/pdf", json=payload, timeout=4)
     except Exception:
         pass
 
 st.markdown("---")
 st.info("Institutional model: multi-tier promote, Monte Carlo, PDF reporting. Adjust inputs and rerun.")
-

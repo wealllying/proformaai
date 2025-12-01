@@ -1,8 +1,8 @@
 # app.py — Pro Forma AI — Institutional (Full)
 # Run: streamlit run app.py
-# Uses client-side Stripe Checkout. Set env vars:
-# ANNUAL_PRICE_ID, APP_URL, ONE_DEAL_PRICE_ID, STRIPE_PK, STRIPE_SECRET_KEY
-# plus optional STREAMLIT_SERVER_ENABLECORS, STREAMLIT_SERVER_ENABLEXSRS
+# Uses client-side Stripe Checkout. Required env vars:
+# ONE_DEAL_PRICE_ID, ANNUAL_PRICE_ID, APP_URL, STRIPE_PK
+# Optional: STRIPE_SECRET_KEY, MASTER_SIG, PROFORMA_LOGFILE
 
 import os
 import logging
@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import base64
 import requests
 import math
 from datetime import datetime
@@ -19,7 +18,7 @@ import io
 from io import BytesIO
 import textwrap
 
-# Optional PDF/image libs
+# Optional PDF/image libs (ReportLab)
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
@@ -31,7 +30,7 @@ try:
 except Exception:
     REPORTLAB_AVAILABLE = False
 
-# Plotly to image (kaleido)
+# Plotly image export helper (kaleido)
 KALEIDO_AVAILABLE = True
 try:
     import kaleido  # noqa: F401
@@ -46,29 +45,30 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.StreamHandler(),                # logs to stdout (visible in Railway logs)
-        logging.FileHandler(LOGFILE, mode="a")  # logs to file in container
+        logging.StreamHandler(),                # to stdout (Railway logs)
+        logging.FileHandler(LOGFILE, mode="a")  # file in container
     ],
 )
 logger = logging.getLogger("proforma")
-
-# Echo a brief banner in logs
-logger.info("Starting Pro Forma AI app.py")
+logger.info("Starting Pro Forma AI app")
 
 # -------------------------
-# Read env vars (exact names you provided)
+# Environment variables
 # -------------------------
 ONE_DEAL_PRICE_ID = os.getenv("ONE_DEAL_PRICE_ID")
 ANNUAL_PRICE_ID = os.getenv("ANNUAL_PRICE_ID")
 APP_URL = os.getenv("APP_URL")
 STRIPE_PK = os.getenv("STRIPE_PK")
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")  # not used client-side but may be present
-# streamlit server toggles (present because you listed them)
-STREAMLIT_SERVER_ENABLECORS = os.getenv("STREAMLIT_SERVER_ENABLECORS")
-STREAMLIT_SERVER_ENABLEXSRS = os.getenv("STREAMLIT_SERVER_ENABLEXSRS")
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")  # not used client-side but allowed
+MASTER_SIG = os.getenv("MASTER_SIG")  # admin/master override
+# Example tokens (in prod you should move these to env)
+VALID_TOKENS = {
+    "one": os.getenv("VALID_TOKEN_ONE", "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3"),
+    "annual": os.getenv("VALID_TOKEN_ANNUAL", "supersecret-annual-2025-h4j6k8m1p3q5r7t9")
+}
 
-logger.debug("Env vars loaded: ONE_DEAL_PRICE_ID=%s ANNUAL_PRICE_ID=%s APP_URL=%s STRIPE_PK=%s",
-             bool(ONE_DEAL_PRICE_ID), bool(ANNUAL_PRICE_ID), bool(APP_URL), bool(STRIPE_PK))
+logger.debug("Env: ONE_DEAL_PRICE_ID=%s ANNUAL_PRICE_ID=%s APP_URL=%s STRIPE_PK=%s MASTER_SIG=%s",
+             bool(ONE_DEAL_PRICE_ID), bool(ANNUAL_PRICE_ID), bool(APP_URL), bool(STRIPE_PK), bool(MASTER_SIG))
 
 # -------------------------
 # Streamlit page config
@@ -76,137 +76,143 @@ logger.debug("Env vars loaded: ONE_DEAL_PRICE_ID=%s ANNUAL_PRICE_ID=%s APP_URL=%
 st.set_page_config(page_title="Pro Forma AI — Institutional (Full)", layout="wide")
 st.title("Pro Forma AI — Institutional (Full)")
 
-# Show quick env debug in UI (collapsible)
+# Debug / env info (collapsible)
 with st.expander("Debug / Environment (click to expand)"):
-    st.write("Railway / Environment variables (present / absent):")
     st.write({
         "ONE_DEAL_PRICE_ID": bool(ONE_DEAL_PRICE_ID),
         "ANNUAL_PRICE_ID": bool(ANNUAL_PRICE_ID),
         "APP_URL": APP_URL,
         "STRIPE_PK": bool(STRIPE_PK),
         "STRIPE_SECRET_KEY": bool(STRIPE_SECRET_KEY),
-        "STREAMLIT_SERVER_ENABLECORS": STREAMLIT_SERVER_ENABLECORS,
-        "STREAMLIT_SERVER_ENABLEXSRS": STREAMLIT_SERVER_ENABLEXSRS
+        "MASTER_SIG": bool(MASTER_SIG),
+        "PROFORMA_LOGFILE": LOGFILE
     })
     st.write("Log file on container:", LOGFILE)
 
-# If Stripe PK missing, show clear message
 if not STRIPE_PK:
-    st.error("Stripe not configured. Set STRIPE_PK in environment variables to enable Checkout.")
-    logger.warning("STRIPE_PK missing — Stripe checkout will be disabled on UI.")
+    st.warning("Stripe publishable key (STRIPE_PK) is not set. Checkout will be disabled until STRIPE_PK is provided.")
 
 # -------------------------
-# Query params handling (unlock via ?plan=one&token=...)
+# Unlock logic (Option B: flexible dual unlock)
 # -------------------------
 qp = st.query_params
-plan = qp.get("plan", [None])[0]
-token = qp.get("token", [None])[0]
+# st.query_params returns dict of lists; extract safely
+def qp_get(k):
+    v = qp.get(k)
+    if isinstance(v, list) and len(v) > 0:
+        return v[0]
+    return v
 
-# Example valid tokens (in prod put in env or secure store)
-VALID_TOKENS = {
-    "one": "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3",
-    "annual": "supersecret-annual-2025-h4j6k8m1p3q5r7t9"
-}
+plan_q = qp_get("plan")
+token_q = qp_get("token")
+sig_q = qp_get("sig") or qp_get("sig64") or qp_get("signature")  # accept a few names
 
-def unlocked_via_query(plan_arg, token_arg):
+logger.debug("Query params: plan=%s token_present=%s sig_present=%s", plan_q, bool(token_q), bool(sig_q))
+
+def unlocked_via_plan_token(plan_arg, token_arg):
     if not plan_arg or not token_arg:
         return False
-    valid = (plan_arg in VALID_TOKENS and token_arg == VALID_TOKENS[plan_arg])
-    logger.debug("Query unlock attempt: plan=%s token_present=%s valid=%s", plan_arg, bool(token_arg), valid)
+    valid = plan_arg in VALID_TOKENS and token_arg == VALID_TOKENS[plan_arg]
+    logger.debug("unlocked_via_plan_token? plan=%s valid=%s", plan_arg, valid)
     return valid
 
-if unlocked_via_query(plan, token):
-    st.success("Access unlocked via query parameter — full model available.")
-    logger.info("Access unlocked via query params for plan=%s", plan)
-    # proceed to show rest of app below (no paywall)
+def unlocked_via_master_sig(sig_arg):
+    if not sig_arg:
+        return False
+    if MASTER_SIG and sig_arg == MASTER_SIG:
+        logger.debug("unlocked_via_master_sig: MASTER_SIG matched")
+        return True
+    # Also allow token-style master override in env as fallback
+    master_env_sig = os.getenv("MASTER_SIG_ALT")
+    if master_env_sig and sig_arg == master_env_sig:
+        logger.debug("unlocked_via_master_sig: MASTER_SIG_ALT matched")
+        return True
+    return False
+
+IS_UNLOCKED = unlocked_via_plan_token(plan_q, token_q) or unlocked_via_master_sig(sig_q)
+
+if IS_UNLOCKED:
+    st.success("Access unlocked — full model available.")
+    logger.info("Access granted to user (query param). plan=%s", plan_q)
 else:
-    # Paywall UI block — displayed when not unlocked
+    # Show paywall UI
     st.header("Pro Forma AI — Institutional Access Required")
-    st.write("Unlock Full Model Instantly")
-    st.markdown("---")
-    st.write("You can also unlock directly by visiting: `?plan=one&token=...`")
+    st.markdown("### Unlock Full Model Instantly")
+    st.write("Or unlock directly by visiting: `?plan=one&token=...` or `?sig=MASTER_KEY`")
 
     col1, col2 = st.columns(2)
 
-    # Use simple immediate redirect approach: when button clicked, render Stripe JS that redirects to Checkout.
+    # When user clicks a button, we inject client-side Stripe JS to redirect to Checkout.
+    # This keeps server-side secret out of the UI and avoids requiring the stripe python package.
+    def stripe_checkout_js(price_id, success_url, cancel_url):
+        # Build safe JS that uses Stripe.js redirectToCheckout
+        return f"""
+        <script src="https://js.stripe.com/v3/"></script>
+        <script>
+        (function() {{
+            try {{
+                var stripe = Stripe("{STRIPE_PK}");
+                stripe.redirectToCheckout({{
+                    lineItems: [{{ price: "{price_id}", quantity: 1 }}],
+                    mode: 'payment',
+                    successUrl: "{success_url}",
+                    cancelUrl: "{cancel_url}"
+                }}).then(function (result) {{
+                    if (result.error) {{
+                        var el = document.createElement('div');
+                        el.style.padding = '12px';
+                        el.style.background = '#fee';
+                        el.style.border = '1px solid #f99';
+                        el.innerText = result.error.message || 'Stripe Checkout error';
+                        document.body.appendChild(el);
+                    }}
+                }});
+            }} catch (e) {{
+                var el2 = document.createElement('div');
+                el2.style.padding = '12px';
+                el2.style.background = '#fee';
+                el2.style.border = '1px solid #f99';
+                el2.innerText = 'Stripe JS initialization failed: ' + String(e);
+                document.body.appendChild(el2);
+            }}
+        }})();
+        </script>
+        """
+
     with col1:
-        if st.button("One Deal — $999", key="btn_one"):
-            logger.info("User clicked One Deal button")
+        if st.button("One Deal — $999", key="pay_one"):
+            logger.info("User clicked One Deal")
             if not STRIPE_PK or not ONE_DEAL_PRICE_ID or not APP_URL:
                 st.error("Stripe config incomplete (STRIPE_PK / ONE_DEAL_PRICE_ID / APP_URL required). Check environment variables.")
-                logger.error("Stripe config incomplete on One Deal click.")
+                logger.error("Stripe config missing on One Deal click")
             else:
-                success_url = f"{APP_URL}?plan=one&token={VALID_TOKENS['one']}"
-                cancel_url = APP_URL
-                js = f"""
-                <script src="https://js.stripe.com/v3/"></script>
-                <script>
-                (function() {{
-                    var stripe = Stripe("{STRIPE_PK}");
-                    stripe.redirectToCheckout({{
-                        lineItems: [{{ price: "{ONE_DEAL_PRICE_ID}", quantity: 1 }}],
-                        mode: 'payment',
-                        successUrl: "{success_url}",
-                        cancelUrl: "{cancel_url}"
-                    }}).then(function (result) {{
-                        if (result.error) {{
-                            var el = document.createElement('div');
-                            el.style.padding = '12px';
-                            el.style.background = '#fee';
-                            el.style.border = '1px solid #f99';
-                            el.innerText = result.error.message || 'Stripe Checkout error';
-                            document.body.appendChild(el);
-                        }}
-                    }});
-                }})();
-                </script>
-                """
-                # components HTML height must be > 0 for JS to execute
-                st.components.v1.html(js, height=250)
-                logger.info("Injected Stripe JS for One Deal redirect (client-side).")
+                success = f"{APP_URL.rstrip('/')}/?plan=one&token={VALID_TOKENS['one']}"
+                cancel = APP_URL
+                js = stripe_checkout_js(ONE_DEAL_PRICE_ID, success, cancel)
+                # render JS in small HTML container — height must be >0 for browsers to run it
+                st.components.v1.html(js, height=200)
+                logger.debug("Injected Stripe JS for One Deal")
 
     with col2:
-        if st.button("Unlimited — $99,000/year", key="btn_annual"):
-            logger.info("User clicked Annual button")
+        if st.button("Unlimited — $99,000/year", key="pay_annual"):
+            logger.info("User clicked Annual")
             if not STRIPE_PK or not ANNUAL_PRICE_ID or not APP_URL:
                 st.error("Stripe config incomplete (STRIPE_PK / ANNUAL_PRICE_ID / APP_URL required). Check environment variables.")
-                logger.error("Stripe config incomplete on Annual click.")
+                logger.error("Stripe config missing on Annual click")
             else:
-                success_url = f"{APP_URL}?plan=annual&token={VALID_TOKENS['annual']}"
-                cancel_url = APP_URL
-                js = f"""
-                <script src="https://js.stripe.com/v3/"></script>
-                <script>
-                (function() {{
-                    var stripe = Stripe("{STRIPE_PK}");
-                    stripe.redirectToCheckout({{
-                        lineItems: [{{ price: "{ANNUAL_PRICE_ID}", quantity: 1 }}],
-                        mode: 'payment',
-                        successUrl: "{success_url}",
-                        cancelUrl: "{cancel_url}"
-                    }}).then(function (result) {{
-                        if (result.error) {{
-                            var el = document.createElement('div');
-                            el.style.padding = '12px';
-                            el.style.background = '#fee';
-                            el.style.border = '1px solid #f99';
-                            el.innerText = result.error.message || 'Stripe Checkout error';
-                            document.body.appendChild(el);
-                        }}
-                    }});
-                }})();
-                </script>
-                """
-                st.components.v1.html(js, height=250)
-                logger.info("Injected Stripe JS for Annual redirect (client-side).")
+                success = f"{APP_URL.rstrip('/')}/?plan=annual&token={VALID_TOKENS['annual']}"
+                cancel = APP_URL
+                js = stripe_checkout_js(ANNUAL_PRICE_ID, success, cancel)
+                st.components.v1.html(js, height=200)
+                logger.debug("Injected Stripe JS for Annual")
 
-    st.stop()  # stop so the rest of the app (paywalled content) doesn't render
+    st.stop()  # stop here — paywall only
 
 # ---------------------------
-# (Below this point: unlocked app content — the full model)
+# Unlocked app content starts here
 # ---------------------------
 
-# Sidebar inputs (same model as original — kept intact)
+# Sidebar inputs (kept from your original)
 with st.sidebar:
     st.header("Acquisition & Capital Stack")
     purchase_price = st.number_input("Purchase Price ($)", value=100_000_000, step=1_000_000)
@@ -283,18 +289,13 @@ with st.sidebar:
 # ---------------------------
 # Helper functions (model, waterfall, pdf, etc.)
 # ---------------------------
-# (For brevity I include the same robust functions as in your original code — unchanged logic)
-# robust_irr, annual_payment, safe_cap, compute_amort_schedule, settle_final_distribution,
-# apply_periodic_waterfall, build_model_and_settle_det, run_montecarlo, generate_sample_csv,
-# figure_to_png_bytes, fetch_logo_image, split_dataframe_for_table, add_header_footer, generate_long_pdf_memo,
-# generate_pdf_report
 
-# --- robust_irr ---
+# Try to import numpy_financial — fallback handled in functions
 try:
     import numpy_financial as npf
 except Exception:
     npf = None
-    logger.debug("numpy_financial not available; using fallback functions where needed.")
+    logger.debug("numpy_financial not available; using fallback where needed.")
 
 def robust_irr(cfs):
     try:
@@ -305,7 +306,6 @@ def robust_irr(cfs):
             return float(irr)
     except Exception:
         pass
-    # fallback bisection
     def npv(r):
         return sum(cf / ((1 + r) ** i) for i, cf in enumerate(cfs))
     low, high = -0.9999, 10.0
@@ -338,7 +338,7 @@ def annual_payment(loan, rate, amort_years):
         return loan * rate
     if npf is not None:
         return float(-npf.pmt(rate, amort_years, loan))
-    # fallback approximate
+    # simple fallback
     x = (1 + rate) ** amort_years
     if rate == 0:
         return loan / amort_years
@@ -578,7 +578,6 @@ def generate_sample_csv(cf_table):
     return buf.getvalue().encode()
 
 def figure_to_png_bytes(fig):
-    # tries to export Plotly figure to PNG using kaleido
     try:
         return fig.to_image(format="png")
     except Exception as e:
@@ -611,19 +610,22 @@ def split_dataframe_for_table(df, max_rows=30):
     return parts
 
 def add_header_footer(c, logo_blob_tuple):
-    width, height = letter
-    c.setFont("Helvetica", 8)
-    c.drawString(36, height - 50, "Pro Forma AI — Institutional")
-    c.drawRightString(width - 36, height - 50, datetime.today().strftime("%B %d, %Y"))
-    page_num_text = f"Page {c.getPageNumber()}"
-    c.drawCentredString(width / 2.0, 30, page_num_text)
-    if logo_blob_tuple:
-        try:
-            logo_bytes, _ = logo_blob_tuple
-            img = ImageReader(BytesIO(logo_bytes))
-            c.drawImage(img, width - 140, height - 70, width=80, height=30, preserveAspectRatio=True, mask='auto')
-        except Exception:
-            pass
+    try:
+        width, height = letter
+        c.setFont("Helvetica", 8)
+        c.drawString(36, height - 50, "Pro Forma AI — Institutional")
+        c.drawRightString(width - 36, height - 50, datetime.today().strftime("%B %d, %Y"))
+        page_num_text = f"Page {c.getPageNumber()}"
+        c.drawCentredString(width / 2.0, 30, page_num_text)
+        if logo_blob_tuple:
+            try:
+                logo_bytes, _ = logo_blob_tuple
+                img = ImageReader(BytesIO(logo_bytes))
+                c.drawImage(img, width - 140, height - 70, width=80, height=30, preserveAspectRatio=True, mask='auto')
+            except Exception:
+                pass
+    except Exception:
+        logger.warning("add_header_footer error", exc_info=True)
 
 def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob_tuple):
     if not REPORTLAB_AVAILABLE:
@@ -648,19 +650,6 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
         f"The analysis includes capital stack assumptions (senior LTV {senior_ltv:.0%}), mezzanine (if used), LP/GP split, preferred return, and a multi-tier promote based on IRR hurdles.",
         200)
     story.append(Paragraph(exec_text, normal))
-    story.append(Spacer(1, 12))
-    story.append(PageBreak())
-    story.append(Paragraph("Investment Highlights", styles['Heading2']))
-    bullets = [
-        f"Purchase Price: ${purchase_price:,.0f}",
-        f"Total Cost incl. closing: ${total_cost:,.0f}",
-        f"Estimated Equity: ${total_equity:,.0f}",
-        f"Hold Period: {hold} years",
-        f"Exit Cap: {exit_cap:.2%}",
-        f"Preferred Return (LP): {pref_annual:.2%}",
-    ]
-    for b in bullets:
-        story.append(Paragraph(f"• {b}", normal))
     story.append(Spacer(1, 12))
     story.append(PageBreak())
 
@@ -696,21 +685,19 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
         story.append(Paragraph(line, normal))
     story.append(Spacer(1, 12))
 
-    # attempt to embed both chart images
+    # embed charts if available
     try:
         png_hist = figure_to_png_bytes(fig_monte) if fig_monte is not None else None
         png_wf = figure_to_png_bytes(fig_waterfall) if fig_waterfall is not None else None
         if png_hist:
             story.append(Paragraph("LP IRR Distribution", styles['Heading3']))
             story.append(Spacer(1, 6))
-            img = ImageReader(BytesIO(png_hist))
-            story.append(img)
+            story.append(ImageReader(BytesIO(png_hist)))
             story.append(Spacer(1, 6))
         if png_wf:
             story.append(Paragraph("Deterministic LP Waterfall", styles['Heading3']))
             story.append(Spacer(1, 6))
-            img2 = ImageReader(BytesIO(png_wf))
-            story.append(img2)
+            story.append(ImageReader(BytesIO(png_wf)))
             story.append(Spacer(1, 6))
     except Exception as e:
         logger.warning("Embedding charts into PDF failed: %s", e)
@@ -751,7 +738,6 @@ def generate_pdf_report(det, monte_stats, fig_monte, fig_waterfall, logo_blob_tu
         return pdf_bytes, filename
     except Exception as e:
         logger.warning("generate_long_pdf_memo failed: %s", e)
-        # Fallback: small text-based report
         text = (f"Pro Forma AI Summary\nDate: {datetime.today().strftime('%B %d, %Y')}\n"
                 f"LP IRR (det): {robust_irr(det['lp_cfs']):.2%}\n"
                 f"P50 (MC): {monte_stats.get('p50', 'N/A')}\n"
@@ -808,11 +794,10 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         cc3.metric("P95", f"{p95:.2%}")
         st.metric("Probability DSCR < 1.2", f"{breaches / max(1, int(n_sims)):.1%}")
 
-        # Single combined area to present Monte Carlo distribution + waterfall together in UI
+        # show distribution + waterfall
         fig_monte = px.histogram(irrs * 100, nbins=80, title="LP IRR Distribution (Monte Carlo)")
         fig_monte.add_vline(x=p50 * 100, line_color="white", line_width=3)
 
-        # Deterministic LP waterfall (small)
         op_sum = sum([x for x in det['lp_cfs'][1:-1]]) if len(det['lp_cfs']) > 2 else 0
         wf = go.Figure(go.Waterfall(
             x=["Equity In", "Operating CF", "Exit/Residual"],
@@ -821,11 +806,9 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         ))
         wf.update_layout(title="Deterministic LP Waterfall", template="plotly_white")
 
-        # Show them stacked
+        # present charts
         st.plotly_chart(fig_monte, use_container_width=True)
         st.plotly_chart(wf, use_container_width=True)
-
-        # For PDF embedding we return the figure objects
         fig_waterfall = wf
 
     monte_stats = {
@@ -851,7 +834,7 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
             mime = "application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream"
             st.success("PDF memo ready")
             st.download_button("Download Full PDF Memo", pdf_bytes, filename, mime)
-            logger.info("PDF memo generated and ready for download: %s", filename)
+            logger.info("PDF memo generated: %s", filename)
         except Exception as e:
             st.error(f"PDF generation failed: {e}")
             logger.exception("PDF generation failed")
@@ -865,7 +848,7 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         pd.DataFrame({"LP_IRR": irrs}).to_csv(buf, index=False)
         st.download_button("Download Monte Carlo IRRs (CSV)", buf.getvalue().encode(), "mc_irrs.csv", "text/csv")
 
-    # optional: post run telemetry (non-blocking)
+    # telemetry (non-blocking)
     try:
         payload = {
             "date": datetime.today().strftime("%B %d, %Y"),
@@ -873,10 +856,10 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
             "p95": monte_stats.get('p95'),
             "min_dscr": f"{min(dscr_path):.2f}x" if dscr_path else "N/A",
         }
-        # fire-and-forget
         requests.post(f"{APP_URL.rstrip('/')}/api/pdf", json=payload, timeout=4)
     except Exception:
         pass
 
 st.markdown("---")
-st.info("This is an institutional-grade model with multi-tier promote settlement, Monte Carlo analysis, and automated multi-page PDF reporting (with logo/header/footer). Adjust inputs and rerun.")
+st.info("Institutional model: multi-tier promote, Monte Carlo, PDF reporting. Adjust inputs and rerun.")
+

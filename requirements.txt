@@ -1,18 +1,9 @@
-streamlit==1.39.0
-numpy==1.26.4
-pandas==2.2.2
-plotly==5.23.0
-kaleido==0.2.1
-
-# Payment / Stripe
-stripe==10.9.0
-
-# PDF export
-reportlab==4.2.2
-
-# Images
-Pillow==10.4.0
-
-# Optional helpers
-requests==2.32.3
-python-dateutil==2.9.0
+streamlit
+stripe
+psycopg2-binary
+flask
+numpy
+pandas
+plotly
+reportlab
+kaleido

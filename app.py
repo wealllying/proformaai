@@ -2,7 +2,7 @@
 # Run: streamlit run app.py
 # Uses client-side Stripe Checkout. Required env vars:
 # ONE_DEAL_PRICE_ID, ANNUAL_PRICE_ID, APP_URL, STRIPE_PK
-# Optional: STRIPE_SECRET_KEY, MASTER_SIG, PROFORMA_LOGFILE
+# Optional: STRIPE_SECRET_KEY, MASTER_SIG, PROFORMA_LOGFILE, VALID_TOKEN_ONE, VALID_TOKEN_ANNUAL
 
 import os
 import logging
@@ -29,6 +29,10 @@ try:
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
+    # fallback page size (points for letter)
+    letter = (612, 792)
+    ImageReader = None
+    colors = None
 
 # Plotly image export helper (kaleido)
 KALEIDO_AVAILABLE = True
@@ -45,7 +49,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.StreamHandler(),                # to stdout (Railway logs)
+        logging.StreamHandler(),                # to stdout (visible in host logs)
         logging.FileHandler(LOGFILE, mode="a")  # file in container
     ],
 )
@@ -61,14 +65,16 @@ APP_URL = os.getenv("APP_URL")
 STRIPE_PK = os.getenv("STRIPE_PK")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")  # not used client-side but allowed
 MASTER_SIG = os.getenv("MASTER_SIG")  # admin/master override
-# Example tokens (in prod you should move these to env)
+# Example tokens (in prod move to env)
 VALID_TOKENS = {
     "one": os.getenv("VALID_TOKEN_ONE", "supersecret-onedeal-2025-x7k9p2m4v8q1r5t3"),
     "annual": os.getenv("VALID_TOKEN_ANNUAL", "supersecret-annual-2025-h4j6k8m1p3q5r7t9")
 }
 
-logger.debug("Env: ONE_DEAL_PRICE_ID=%s ANNUAL_PRICE_ID=%s APP_URL=%s STRIPE_PK=%s MASTER_SIG=%s",
-             bool(ONE_DEAL_PRICE_ID), bool(ANNUAL_PRICE_ID), bool(APP_URL), bool(STRIPE_PK), bool(MASTER_SIG))
+logger.debug(
+    "Env: ONE_DEAL_PRICE_ID=%s ANNUAL_PRICE_ID=%s APP_URL=%s STRIPE_PK=%s MASTER_SIG=%s",
+    bool(ONE_DEAL_PRICE_ID), bool(ANNUAL_PRICE_ID), bool(APP_URL), bool(STRIPE_PK), bool(MASTER_SIG)
+)
 
 # -------------------------
 # Streamlit page config
@@ -91,12 +97,13 @@ with st.expander("Debug / Environment (click to expand)"):
 
 if not STRIPE_PK:
     st.warning("Stripe publishable key (STRIPE_PK) is not set. Checkout will be disabled until STRIPE_PK is provided.")
+    logger.warning("STRIPE_PK missing — Stripe Checkout disabled in UI")
 
 # -------------------------
-# Unlock logic (Option B: flexible dual unlock)
+# Unlock logic (dual detection)
 # -------------------------
 qp = st.query_params
-# st.query_params returns dict of lists; extract safely
+
 def qp_get(k):
     v = qp.get(k)
     if isinstance(v, list) and len(v) > 0:
@@ -105,7 +112,7 @@ def qp_get(k):
 
 plan_q = qp_get("plan")
 token_q = qp_get("token")
-sig_q = qp_get("sig") or qp_get("sig64") or qp_get("signature")  # accept a few names
+sig_q = qp_get("sig") or qp_get("sig64") or qp_get("signature")
 
 logger.debug("Query params: plan=%s token_present=%s sig_present=%s", plan_q, bool(token_q), bool(sig_q))
 
@@ -122,7 +129,6 @@ def unlocked_via_master_sig(sig_arg):
     if MASTER_SIG and sig_arg == MASTER_SIG:
         logger.debug("unlocked_via_master_sig: MASTER_SIG matched")
         return True
-    # Also allow token-style master override in env as fallback
     master_env_sig = os.getenv("MASTER_SIG_ALT")
     if master_env_sig and sig_arg == master_env_sig:
         logger.debug("unlocked_via_master_sig: MASTER_SIG_ALT matched")
@@ -133,17 +139,14 @@ IS_UNLOCKED = unlocked_via_plan_token(plan_q, token_q) or unlocked_via_master_si
 
 if IS_UNLOCKED:
     st.success("Access unlocked — full model available.")
-    logger.info("Access granted to user (query param). plan=%s", plan_q)
+    logger.info("Access granted via query params. plan=%s", plan_q)
 else:
-    # Show paywall UI
+    # Paywall UI: show two Stripe buttons; clicking injects JS that calls Stripe.redirectToCheckout
     st.header("Pro Forma AI — Institutional Access Required")
     st.markdown("### Unlock Full Model Instantly")
     st.write("Or unlock directly by visiting: `?plan=one&token=...` or `?sig=MASTER_KEY`")
-
     col1, col2 = st.columns(2)
 
-    # When user clicks a button, we inject client-side Stripe JS to redirect to Checkout.
-    # This keeps server-side secret out of the UI and avoids requiring the stripe python package.
     def stripe_checkout_js(price_id, success_url, cancel_url):
         # Build safe JS that uses Stripe.js redirectToCheckout
         return f"""
@@ -181,38 +184,35 @@ else:
 
     with col1:
         if st.button("One Deal — $999", key="pay_one"):
-            logger.info("User clicked One Deal")
+            logger.info("One Deal button clicked")
             if not STRIPE_PK or not ONE_DEAL_PRICE_ID or not APP_URL:
                 st.error("Stripe config incomplete (STRIPE_PK / ONE_DEAL_PRICE_ID / APP_URL required). Check environment variables.")
-                logger.error("Stripe config missing on One Deal click")
+                logger.error("Stripe config incomplete on One Deal click")
             else:
                 success = f"{APP_URL.rstrip('/')}/?plan=one&token={VALID_TOKENS['one']}"
                 cancel = APP_URL
                 js = stripe_checkout_js(ONE_DEAL_PRICE_ID, success, cancel)
-                # render JS in small HTML container — height must be >0 for browsers to run it
-                st.components.v1.html(js, height=200)
+                st.components.v1.html(js, height=250)
                 logger.debug("Injected Stripe JS for One Deal")
 
     with col2:
         if st.button("Unlimited — $99,000/year", key="pay_annual"):
-            logger.info("User clicked Annual")
+            logger.info("Annual button clicked")
             if not STRIPE_PK or not ANNUAL_PRICE_ID or not APP_URL:
                 st.error("Stripe config incomplete (STRIPE_PK / ANNUAL_PRICE_ID / APP_URL required). Check environment variables.")
-                logger.error("Stripe config missing on Annual click")
+                logger.error("Stripe config incomplete on Annual click")
             else:
                 success = f"{APP_URL.rstrip('/')}/?plan=annual&token={VALID_TOKENS['annual']}"
                 cancel = APP_URL
                 js = stripe_checkout_js(ANNUAL_PRICE_ID, success, cancel)
-                st.components.v1.html(js, height=200)
+                st.components.v1.html(js, height=250)
                 logger.debug("Injected Stripe JS for Annual")
 
-    st.stop()  # stop here — paywall only
+    st.stop()  # don't render locked app
 
 # ---------------------------
-# Unlocked app content starts here
+# Unlocked content: Sidebar inputs and full model
 # ---------------------------
-
-# Sidebar inputs (kept from your original)
 with st.sidebar:
     st.header("Acquisition & Capital Stack")
     purchase_price = st.number_input("Purchase Price ($)", value=100_000_000, step=1_000_000)
@@ -287,15 +287,15 @@ with st.sidebar:
         logo_url = st.text_input("Logo image URL (https://...)")
 
 # ---------------------------
-# Helper functions (model, waterfall, pdf, etc.)
+# Helper functions & model (robust_irr, amort, waterfall, montecarlo, pdf)
 # ---------------------------
 
-# Try to import numpy_financial — fallback handled in functions
+# Try numpy_financial
 try:
     import numpy_financial as npf
 except Exception:
     npf = None
-    logger.debug("numpy_financial not available; using fallback where needed.")
+    logger.debug("numpy_financial not available; will use fallbacks where required")
 
 def robust_irr(cfs):
     try:
@@ -338,7 +338,7 @@ def annual_payment(loan, rate, amort_years):
         return loan * rate
     if npf is not None:
         return float(-npf.pmt(rate, amort_years, loan))
-    # simple fallback
+    # fallback
     x = (1 + rate) ** amort_years
     if rate == 0:
         return loan / amort_years
@@ -617,7 +617,7 @@ def add_header_footer(c, logo_blob_tuple):
         c.drawRightString(width - 36, height - 50, datetime.today().strftime("%B %d, %Y"))
         page_num_text = f"Page {c.getPageNumber()}"
         c.drawCentredString(width / 2.0, 30, page_num_text)
-        if logo_blob_tuple:
+        if logo_blob_tuple and ImageReader is not None:
             try:
                 logo_bytes, _ = logo_blob_tuple
                 img = ImageReader(BytesIO(logo_bytes))
@@ -663,12 +663,13 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
     for idx, part in enumerate(parts):
         data = [list(part.columns)] + part.values.tolist()
         t = Table(data, repeatRows=1, hAlign='LEFT')
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
-            ('GRID', (0, 0), (-1, -1), 0.3, colors.grey),
-            ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-        ]))
+        if colors is not None:
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.grey),
+                ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ]))
         story.append(t)
         story.append(Spacer(1, 8))
         if idx < len(parts) - 1:
@@ -689,12 +690,12 @@ def generate_long_pdf_memo(det, monte_stats, fig_monte, fig_waterfall, logo_blob
     try:
         png_hist = figure_to_png_bytes(fig_monte) if fig_monte is not None else None
         png_wf = figure_to_png_bytes(fig_waterfall) if fig_waterfall is not None else None
-        if png_hist:
+        if png_hist and ImageReader is not None:
             story.append(Paragraph("LP IRR Distribution", styles['Heading3']))
             story.append(Spacer(1, 6))
             story.append(ImageReader(BytesIO(png_hist)))
             story.append(Spacer(1, 6))
-        if png_wf:
+        if png_wf and ImageReader is not None:
             story.append(Paragraph("Deterministic LP Waterfall", styles['Heading3']))
             story.append(Spacer(1, 6))
             story.append(ImageReader(BytesIO(png_wf)))
@@ -806,7 +807,6 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
         ))
         wf.update_layout(title="Deterministic LP Waterfall", template="plotly_white")
 
-        # present charts
         st.plotly_chart(fig_monte, use_container_width=True)
         st.plotly_chart(wf, use_container_width=True)
         fig_waterfall = wf
@@ -862,4 +862,3 @@ if st.button("Run Full Institutional Model (Deterministic + Monte Carlo)"):
 
 st.markdown("---")
 st.info("Institutional model: multi-tier promote, Monte Carlo, PDF reporting. Adjust inputs and rerun.")
-

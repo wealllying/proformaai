@@ -121,75 +121,30 @@ if plan in VALID_TOKENS and token == VALID_TOKENS[plan]:
     st.session_state.username = f"paid_user_{secrets.token_hex(4)}"
 
 # -------------------- AUTH WALL (Login / Register / Pay) --------------------
+# —————— PAY-TO-REGISTER VERSION ——————
 if not st.session_state.logged_in:
-    col_left, col_right = st.columns([1, 2])
+    st.markdown("""
+    <div style="text-align:center;margin-top:80px;">
+    <h1>Pro Forma AI — Institutional</h1>
+    <p>To create an account and get unlimited access, choose a plan:</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with col_left:
-        st.markdown("### Account Access")
-        login()
-        register()
-        st.markdown("---")
-        if st.button("Continue as Guest (limited)"):
-            st.session_state.logged_in = True
-            st.session_state.username = "guest"
-            st.rerun()
+    col1, col2 = st.columns(2)
+    base_url = os.getenv("RAILWAY_STATIC_URL", os.getenv("RENDER_EXTERNAL_URL", "https://your-app.up.railway.app"))
+    if not base_url.startswith("http"): base_url = "https://" + base_url
 
-    with col_right:
-        st.markdown("""
-        <style>
-            .stApp {background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);}
-            .big-title {font-size: 7.2rem !important; font-weight: 900; background: linear-gradient(90deg, #00dbde, #fc00ff);
-                        -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom:0;}
-            .subtitle {text-align:center; color:#ccc; font-size:2.4rem; margin:40px 0 80px 0;}
-            .price-title {color:white; font-size:2.7rem; text-align:center; margin:30px 0 20px 0;}
-            .buy-btn {
-                background: linear-gradient(90deg, #00dbde, #fc00ff);
-                color: white !important;
-                padding: 35px 80px;
-                font-size: 2.5rem;
-                font-weight: bold;
-                border-radius: 50px;
-                text-decoration: none;
-                display: block;
-                width: 90%;
-                margin: 50px auto;
-                text-align: center;
-                box-shadow: 0 15px 40px rgba(0,0,0,0.5);
-            }
-        </style>
-        <div class="big-title">Pro Forma AI</div>
-        <div class="subtitle">The model that closed $4.3B in 2025</div>
-        """, unsafe_allow_html=True)
-
-        col1, col2 = st.columns(2)
-        base_url = os.getenv("RAILWAY_STATIC_URL", os.getenv("RENDER_EXTERNAL_URL", "https://your-app-name.up.railway.app"))
-        if not base_url.startswith("http"):
-            base_url = "https://" + base_url
-
-        with col1:
-            st.markdown('<div class="price-title">One Deal — $999</div>', unsafe_allow_html=True)
-            success_url = f"{base_url}?plan=one&token={VALID_TOKENS['one']}"
-            encoded_success = requests.utils.quote(success_url)
-            st.markdown(f'''
-            <a href="https://buy.stripe.com/dRm5kD66J6wR0Mhfj5co001?client_reference_id=one&success_url={encoded_success}"
-               target="_blank" class="buy-btn">Buy One Deal – $999</a>
-            ''', unsafe_allow_html=True)
-
-        with col2:
-            st.markdown('<div class="price-title">Unlimited + Portfolio — $99,000/year</div>', unsafe_allow_html=True)
-            success_url = f"{base_url}?plan=annual&token={VALID_TOKENS['annual']}"
-            encoded_success = requests.utils.quote(success_url)
-            st.markdown(f'''
-            <a href="https://buy.stripe.com/bJe8wPcv78EZdz38UHco002?client_reference_id=annual&success_url={encoded_success}"
-               target="_blank" class="buy-btn">Buy Unlimited – $99,000/year</a>
-            ''', unsafe_allow_html=True)
-
-        st.markdown("""
-        <p style='text-align:center;color:#888;margin-top:120px;font-size:1.9rem;'>
-        Payment → Instant Auto-Unlock • No login required • Full access forever
-        </p>
-        """, unsafe_allow_html=True)
-        st.stop()
+    with col1:
+        success1 = f"{base_url}?plan=one&token={VALID_TOKENS['one']}"
+        st.markdown(f'<a href="https://buy.stripe.com/...&success_url={requests.utils.quote(success1)}" target="_blank">'
+                    '<button style="padding:20px 40px;font-size:20px;">One Deal – $999 → Instant Access</button></a>',
+                    unsafe_allow_html=True)
+    with col2:
+        success2 = f"{base_url}?plan=annual&token={VALID_TOKENS['annual']}"
+        st.markdown(f'<a href="https://buy.stripe.com/...&success_url={requests.utils.quote(success2)}" target="_blank">'
+                    '<button style="padding:20px 40px;font-size:20px;">Unlimited – $99,000/year → Instant Access</button></a>',
+                    unsafe_allow_html=True)
+    st.stop()
 
 # -------------------- LOGGED IN — SHOW USER + LOGOUT --------------------
 st.success(f"Institutional Access Unlocked — Logged in as: **{st.session_state.username}**")

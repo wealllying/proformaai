@@ -18,21 +18,40 @@ import hashlib
 import json
 import secrets
 
+# -------------------- PROFESSIONAL INSTITUTIONAL THEME — CHARLES SCHWAB / BLACKSTONE LEVEL --------------------
 st.markdown("""
 <style>
-    .stApp {background: #0A0A0A; color: #F5F5F5;}
-    .css-1d391kg {background: #111111;} /* sidebar */
-    section[data-testid="stSidebar"] {background: #111111; border-right: 1px solid #2A2A2A;}
+    /* Main background + text */
+    .stApp {background:#0A0A0A !important; color:#F5F5F5 !important;}
+    section[data-testid="stSidebar"] {background:#111111 !important; border-right:1px solid #2A2A2A;}
+    
+    /* Remove Streamlit branding & default white */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* Buttons — premium teal */
     .stButton>button {
-        background: #00BFBF; color: white; border: none; border-radius: 8px;
-        font-weight: 600; transition: all 0.2s;
+        background:#00BFBF !important; color:white !important; border:none !important;
+        border-radius:12px !important; font-weight:600 !important; padding:12px 24px !important;
+        transition:all 0.2s !important;
     }
-    .stButton>button:hover {background: #008E8E;}
-    hr {border-color: #2A2A2A;}
+    .stButton>button:hover {background:#008E8E !important;}
+    
+    /* Inputs — dark pro look */
     .stTextInput>div>div>input, .stNumberInput>div>div>input, .stSelectbox>div>div>select {
-        background: #111111; color: #F5F5F5; border: 1px solid #2A2A2A;
+        background:#111111 !important; color:#F5F5F5 !important; border:1px solid #2A2A2A !important;
+        border-radius:8px !important;
     }
-    h1, h2, h3, h4 {color: #F5F5F5; font-family: 'Inter', sans-serif; font-weight: 700;}
+    
+    /* Sliders */
+    .stSlider > div > div > div {background:#00BFBF !important;}
+    
+    /* Tables */
+    .dataframe {background:#111111 !important; color:#F5F5F5 !important;}
+    
+    /* Titles */
+    h1, h2, h3, h4, h5 {color:#F5F5F5 !important; font-family:'Inter',sans-serif !important;}
 </style>
 """, unsafe_allow_html=True)
 # -------------------- PDF LIBS --------------------

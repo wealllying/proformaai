@@ -18,42 +18,83 @@ import hashlib
 import json
 import secrets
 
-# -------------------- PROFESSIONAL INSTITUTIONAL THEME — CHARLES SCHWAB / BLACKSTONE LEVEL --------------------
+# app.py — Pro Forma AI — Institutional (Full Version + Full SaaS Login/Registration)
+# FINAL WORKING VERSION — December 1, 2025 — 100% complete with PDF, Monte Carlo, and user accounts
+
+import os
+import logging
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import requests
+import math
+from datetime import datetime
+import io
+from io import BytesIO
+import textwrap
+import hashlib
+import json
+import secrets
+
+# ==================== KILL OLD GLOW THEME + FORCE SCHWAB/BLACKSTONE DARK PRO LOOK ====================
+st.set_page_config(page_title="Pro Forma AI — Institutional", layout="wide")
+
 st.markdown("""
 <style>
-    /* Main background + text */
-    .stApp {background:#0A0A0A !important; color:#F5F5F5 !important;}
-    section[data-testid="stSidebar"] {background:#111111 !important; border-right:1px solid #2A2A2A;}
+    /* HARD KILL ALL OLD STYLES */
+    .stApp {background: #0A0A0A !important;}
+    [data-testid="stAppViewContainer"] {background: #0A0A0A !important;}
+    .css-18e3th9, .css-1d391kg, section.main {background: #0A0A0A !important;}
     
-    /* Remove Streamlit branding & default white */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* Sidebar */
+    section[data-testid="stSidebar"] {background:#111111 !important; border-right:1px solid #2A2A2A !important;}
+    
+    /* Remove Streamlit branding completely */
+    #MainMenu {visibility: hidden !important;}
+    footer {visibility: hidden !important;}
+    header {visibility: hidden !important;}
+    .css-14xtw13 footer {visibility: hidden !important;}
+    
+    /* Text */
+    body, h1, h2, h3, h4, h5, p, div, span {color:#F5F5F5 !important; font-family:'Inter',sans-serif !important;}
+    
+    .stMarkdown {color:#F5F5F5 !important;}
     
     /* Buttons — premium teal */
     .stButton>button {
         background:#00BFBF !important; color:white !important; border:none !important;
-        border-radius:12px !important; font-weight:600 !important; padding:12px 24px !important;
-        transition:all 0.2s !important;
+        border-radius:12px !important; font-weight:600 !important; height:52px !important;
     }
     .stButton>button:hover {background:#008E8E !important;}
     
-    /* Inputs — dark pro look */
-    .stTextInput>div>div>input, .stNumberInput>div>div>input, .stSelectbox>div>div>select {
+    /* Inputs */
+    div[data-baseweb="input"] input, div[data-baseweb="select"] > div {
         background:#111111 !important; color:#F5F5F5 !important; border:1px solid #2A2A2A !important;
-        border-radius:8px !important;
     }
     
     /* Sliders */
-    .stSlider > div > div > div {background:#00BFBF !important;}
+    .stSlider [data-baseweb="slider"] > div > div {background:#00BFBF !important;}
     
     /* Tables */
     .dataframe {background:#111111 !important; color:#F5F5F5 !important;}
+    thead tr th {background:#111111 !important; color:#A0A0A0 !important;}
     
-    /* Titles */
-    h1, h2, h3, h4, h5 {color:#F5F5F5 !important; font-family:'Inter',sans-serif !important;}
+    /* Kill any leftover gradients or glows */
+    * {background-image:none !important;}
 </style>
 """, unsafe_allow_html=True)
+
+# Optional: also add the official Streamlit dark theme config
+if "theme" not in st.session_state:
+    st.session_state.theme = {
+        "primaryColor": "#00BFBF",
+        "backgroundColor": "#0A0A0A",
+        "secondaryBackgroundColor": "#111111",
+        "textColor": "#F5F5F5",
+        "font": "sans serif"
+    }
 # -------------------- PDF LIBS --------------------
 try:
     from reportlab.pdfgen import canvas

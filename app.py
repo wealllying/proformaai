@@ -38,7 +38,8 @@ import hashlib
 import json
 import secrets
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 
     /* ---- BASE APP BACKGROUND ---- */
@@ -63,7 +64,7 @@ st.markdown("""
         color: #D7D9DF !important;
     }
 
-    /* ---- BUTTONS (REAL Streamlit buttons only) ---- */
+    /* ---- BUTTONS ---- */
     .stButton > button {
         background: linear-gradient(90deg,#00C6C6,#009E9E) !important;
         color: white !important;
@@ -76,14 +77,9 @@ st.markdown("""
 
     .stButton > button:hover {
         opacity: 0.95 !important;
-        transform: none !important;
     }
 
-    /* ---- FIX BLACK BLOCKS (remove forced background resets) ---- */
-    /* Remove ANY rules like * { background-image:none } — deadly */
-    /* Remove ANY rules overriding all buttons or all divs */
-
-    /* ---- INPUT FIELDS ---- */
+    /* ---- INPUTS ---- */
     div[data-baseweb="input"] input {
         background: #14161C !important;
         border: 1px solid #262830 !important;
@@ -102,16 +98,17 @@ st.markdown("""
         color: #E9EAEC !important;
     }
 
-    /* ---- CARDS / CONTAINERS ---- */
+    /* ---- MAIN CONTAINER SPACING ---- */
     .block-container {
         padding-top: 2rem !important;
         padding-bottom: 3rem !important;
     }
 
 </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
-    }
 # -------------------- PDF LIBS --------------------
 try:
     from reportlab.pdfgen import canvas
